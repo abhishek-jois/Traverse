@@ -483,3 +483,20 @@ Everything else — graph building, retrieval, incremental sync, HTML viewer, MC
 | `anthropic` | Optional | LLM-generated file descriptions |
 
 Python 3.9 or later. No database, no server, no external services required for core functionality.
+
+---
+
+## Contributors
+
+| Name | Role |
+|------|------|
+| [Abhishek Jois](https://github.com/abhishek-jois) | Creator — architecture, design, and direction |
+| [Claude](https://claude.ai) (Anthropic) | AI pair programmer — implementation, incremental sync, MCP integration, A/B harness |
+
+---
+
+## License
+
+MIT License — see [LICENSE](./LICENSE) for the full text.
+
+Copyright (c) 2026 Abhishek Jois
