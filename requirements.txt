@@ -1,0 +1,10 @@
+# --- Required ---
+networkx>=3.0          # graph representation, traversal, centrality
+
+# --- Optional: accurate JS/TS parsing (regex fallback used if absent) ---
+# tree_sitter>=0.21
+# tree_sitter_languages>=1.10
+
+# --- Optional: richer AI-generated one-line descriptions (heuristic used if absent) ---
+# Set ANTHROPIC_API_KEY and run `build --llm` to enable.
+# anthropic>=0.40

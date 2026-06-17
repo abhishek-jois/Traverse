@@ -1,0 +1,35 @@
+[project]
+name = "depgraph"
+version = "0.1.0"
+description = "Dependency Graph Retrieval — smarter context for smarter code"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "networkx>=3.0",
+]
+
+[project.optional-dependencies]
+# Accurate JS/TS parsing (regex fallback used if absent)
+treesitter = [
+    "tree-sitter>=0.21",
+    "tree-sitter-languages>=1.10",
+]
+# AI-generated one-line descriptions (`build --llm`, needs ANTHROPIC_API_KEY)
+llm = [
+    "anthropic>=0.40",
+]
+# Expose the graph to Claude Code / other agents as an MCP server.
+mcp = [
+    "mcp>=1.2",
+]
+
+[project.scripts]
+depgraph = "depgraph.cli:main"
+depgraph-mcp = "depgraph.mcp_server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["depgraph"]
