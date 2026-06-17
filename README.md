@@ -1,81 +1,153 @@
 # Dependency Graph Retrieval
 
-**Smarter context for smarter AI** — *Every file visible. Only what matters loaded.*
+> **Give AI a map of your codebase before it starts reading.**
 
-Instead of dumping an entire codebase into an AI's context window — or hoping a keyword search finds the right file — Dependency Graph Retrieval builds a **lightweight weighted map** of your repo. When you ask a question, it traverses that map and returns only the 5–20 files that actually matter for the task. The rest stay out of context.
+---
+
+## The Problem
+
+When you ask an AI assistant to work on a large codebase, it has no idea where to look. So it does the only thing it can — it searches blindly. It greps for keywords, opens files that sound relevant, reads through them, finds they're wrong, opens more files, and repeats until it stumbles across what it actually needed. On a 1,600-file monorepo this can mean 20 agent turns, dozens of unnecessary file reads, and a cost that is entirely driven by wasted exploration rather than actual work.
+
+The root cause is simple: the AI has no structural knowledge of the codebase. It doesn't know which files import which, which modules are central to a feature, or which files are guaranteed to be relevant before it reads a single byte of content.
+
+---
+
+## What We Are Building
+
+**Dependency Graph Retrieval** is a system that builds a lightweight weighted map of a codebase — a dependency graph — and lets an AI query that map before touching any file.
+
+The key insight is separating **knowing** from **reading**:
+
+- The graph stores only **metadata**: file path, a one-line description, file type, and dependency relationships. No file content is ever stored.
+- Every file in the codebase is always **visible** in the graph, so the AI can never miss a file it didn't know existed.
+- When a task comes in, the AI **traverses** the graph using the query — scoring files on metadata, following weighted dependency edges, stopping when relevance falls off — and returns only the 5–20 files that actually matter.
+- The AI then reads **only those files** and does the work.
+
+This turns the navigation problem from an open-ended search into a targeted lookup. The AI goes from wandering a forest to following a map.
 
 ```
-Without graph:  Claude searches 1,600 files → reads ~35 wrong ones → wanders for 20 turns
-With graph:     Claude queries the map → reads 12 targeted files → done in 11 turns
+Without graph:  AI searches 1,600 files → reads ~35 wrong ones → wanders for 20 turns
+With graph:     AI queries the map → reads 12 targeted files → done in 11 turns
 ```
 
-> Measured on a real 1,600-file monorepo. See [A/B test results](./ab_test_summary.md).
+> Measured on a real 1,600-file monorepo. Full results in [ab_test_summary.md](./ab_test_summary.md).
 
 ---
 
 ## How It Works
 
+The system has two phases: **build once**, **query many times**.
+
+### Phase 1 — Build the Graph
+
 ```
-Repo files
+Your repo
     │
     ▼
-[ Scanner ]  ──  walks every file, records metadata only
-                 (path, description, type, size, hash)
+Scanner          Walks every file. Records path, type, size, hash.
+                 Never reads content into the graph — metadata only.
     │
     ▼
-[ Extractor ]  ──  per-file: imports, calls, inheritance, config deps
+Extractor        Per-file: extracts imports, function calls,
+                 class inheritance, config references.
+                 Python via stdlib ast. JS/TS via tree-sitter (regex fallback).
     │
     ▼
-[ Graph Builder ]  ──  resolves cross-file imports → weighted edges (1–10)
-                        nodes = file metadata, never full content
+Graph Builder    Resolves cross-file relationships into a directed graph.
+                 Each edge carries a weight 1–10 based on coupling strength:
+                 inheritance (strongest) → named imports → bare imports (weakest).
     │
     ▼
-[ graph.json + graph.html ]  ──  NetworkX graph + interactive browser viewer
-    │
-    ▼
-[ Query ]  ──  score all nodes on metadata (cheap)
-               → seed from top matches
-               → follow thick edges, stop at cutoff
-               → return 5–20 relevant files + token savings
+.depgraph/
+  graph.json     The graph — nodes (file metadata) + weighted edges.
+  graph.html     Self-contained interactive visual viewer. Open in any browser.
+  cache/         Per-file extraction cache keyed by sha256.
 ```
 
-- **Nodes = files** holding only metadata (path, one-line description, file type, last-modified, size). The full content is never stored in the graph — keeping it tiny so every file is always *visible*.
-- **Edges = relationships** (imports, function calls, class inheritance, config dependencies), each weighted **1–10** by coupling strength.
-- **Query = traversal**: score files on metadata, follow thick edges, stop when relevance drops below a cutoff, return the minimal relevant set.
+### Phase 2 — Query the Graph
+
+```
+Natural language query: "how does authentication work"
+    │
+    ▼
+Metadata scoring     Score every node on filename + description + type + symbols.
+                     Cheap: no file reads. BM25-style keyword relevance.
+    │
+    ▼
+Seed selection       Take the top-scoring nodes as traversal seeds.
+    │
+    ▼
+Weighted traversal   Follow edges from seeds. Propagate relevance as:
+                       next_score = current_score × (edge_weight / 10)
+                     Stop when score drops below the adaptive cutoff.
+                     Thick edges (tight coupling) propagate further.
+                     Thin edges (weak coupling) stop quickly.
+    │
+    ▼
+Result               5–20 files with: path, description, why selected, token estimate.
+                     Plus: X tokens selected vs Y tokens full repo → Z% saved.
+```
+
+### Incremental Sync
+
+The graph does not require a full rebuild when files change. Every query first runs a three-pass diff:
+
+1. **Stat sweep** — check size and mtime for every file (no reads, ~250ms on 1,600 files)
+2. **Hash confirm** — sha256 only files that stat-changed (filters out touch-without-edit)
+3. **Patch in place** — re-parse changed files only; re-resolve all edges in memory
+
+This means after editing a file, the next query automatically reflects the new state. The graph is always current.
 
 ---
 
-## Features
+## Graph Nodes and Edges
 
-- **Language support** — Python (stdlib `ast`) + JavaScript/TypeScript (tree-sitter when available, regex fallback). Extractor dispatch is built to extend.
-- **Depth presets** — `focused` (~5 files) / `balanced` (~8, default) / `deep` (~12) / `exhaustive` (~20). Switch with `--depth`.
-- **Incremental sync** — stat-only sweep on every query detects changed files, re-parses only those, patches the graph in place. No full rebuild needed. ~250ms on 1,600 files when nothing changed.
-- **Interactive HTML viewer** — self-contained, offline-ready. Nodes coloured by type, sized by connectivity; edge thickness = weight; click any node for metadata + neighbours; search box; physics toggle.
-- **Claude Code plugin (MCP)** — registers as a tool server so any Claude Code session can call `depgraph_query` and `depgraph_map` before reading files. Works across every repo.
-- **Pack mode** — `query --pack` emits every file's metadata + selected files' full contents as a single ready-to-paste context block.
-- **LLM descriptions** — `build --llm` uses the Anthropic API for richer one-line descriptions; falls back to heuristics with no key.
-- **Token savings reporting** — every query shows selected tokens vs full-repo tokens and the % saved.
+**Nodes** store only metadata — never file content:
+
+| Field | Value |
+|-------|-------|
+| `path` | Relative path from repo root |
+| `description` | One-line summary (heuristic from docstring/comments, or LLM-generated) |
+| `file_type` | `service`, `model`, `config`, `test`, `entrypoint`, `util`, etc. |
+| `mtime` / `size` | For incremental sync |
+| `sha256` | Content hash for cache keying |
+| `always_include` | `true` for config/env files (always pulled into results) |
+
+**Edges** are weighted directed relationships:
+
+| Relationship | Weight |
+|---|:-:|
+| Class inheritance | +4 |
+| Named import, symbol used frequently | +3 |
+| Named import, symbol used occasionally | +2 |
+| Star / namespace import | +1 |
+| Bare module import | +1 |
+| Config / env dependency | max 4, node flagged `always_include` |
+
+Weights from all relationship types between a file pair are summed and clamped to `[1, 10]`.
 
 ---
 
-## Install
+## Installation
 
-Requires Python 3.9+. Uses [uv](https://docs.astral.sh/uv/) — one command:
+Requires **Python 3.9+**. Uses [uv](https://docs.astral.sh/uv/):
 
 ```bash
+git clone <this-repo>
+cd graph
 uv sync
 ```
 
-Optional extras (everything works without them):
+Optional extras — everything works without them:
 
 ```bash
-uv sync --extra treesitter   # accurate JS/TS parsing (regex fallback otherwise)
-uv sync --extra llm          # AI descriptions via --llm  (needs ANTHROPIC_API_KEY)
+uv sync --extra treesitter   # Accurate JS/TS parsing (falls back to regex otherwise)
+uv sync --extra llm          # AI-generated descriptions via --llm (needs ANTHROPIC_API_KEY)
 uv sync --extra mcp          # Claude Code MCP server integration
 ```
 
 <details>
-<summary>Using pip instead</summary>
+<summary>Using pip instead of uv</summary>
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -86,59 +158,65 @@ pip install -r requirements.txt
 
 ---
 
-## Quick Start
+## Quickstart
 
 ```bash
-# 1. Build the graph for your repo (takes 10–60s depending on size)
+# Build the graph for any repo
 uv run depgraph build /path/to/your/repo --open
 
-# 2. Ask which files a task needs
+# Ask which files are relevant to a task
 uv run depgraph query "fix the authentication login bug" /path/to/your/repo
 
-# 3. Get more files for a complex task
+# Get more files for a complex cross-cutting task
 uv run depgraph query "trace the full data pipeline" /path/to/your/repo --depth deep
 
-# 4. Sync after editing files (or just query again — it auto-syncs)
+# Inspect what changed since the last build
 uv run depgraph update /path/to/your/repo
 ```
 
 ---
 
-## Usage Guide
+## Usage
 
-This section walks through the full workflow from zero to using the graph effectively.
-
-### Step 1 — Build the graph for your repo
+### 1. Build the graph
 
 ```bash
 uv run depgraph build /path/to/your/repo
 ```
 
-This scans every file, extracts imports and dependencies, builds a weighted graph, and writes it to `/path/to/your/repo/.depgraph/`. First build takes 10–60 seconds depending on repo size. Subsequent builds are fast (only changed files re-parsed).
+Scans every file, extracts dependencies, builds the weighted graph, writes `.depgraph/` into the repo root. First build takes 10–60 seconds depending on repo size. Output:
 
-Add `--open` to immediately open the visual graph in your browser:
+```
+Scanning /path/to/your/repo …
+  found 1,604 files
+Extracting dependencies …
+  parsed 1,604, reused 0 from cache
+Building weighted graph …
+  1,604 nodes, 3,891 edges
 
-```bash
-uv run depgraph build /path/to/your/repo --open
+✓ graph.json  → .depgraph/graph.json
+✓ graph.html  → .depgraph/graph.html  (open in a browser)
+✓ report.md   → .depgraph/report.md
 ```
 
-Add `--llm` for richer AI-generated descriptions (requires `ANTHROPIC_API_KEY`):
+Flags:
 
-```bash
-ANTHROPIC_API_KEY=sk-... uv run depgraph build /path/to/your/repo --llm
-```
+| Flag | Description |
+|------|-------------|
+| `--open` | Open `graph.html` in browser immediately after build |
+| `--llm` | Use Anthropic API for richer descriptions (needs `ANTHROPIC_API_KEY`) |
+| `--rebuild` | Ignore cache and re-parse every file from scratch |
+| `--docs` | Include markdown/documentation files as graph nodes |
 
 ---
 
-### Step 2 — Query for relevant files
-
-Describe your task in plain English. The graph finds the relevant files without reading any of them:
+### 2. Query for relevant files
 
 ```bash
 uv run depgraph query "how does user authentication work" /path/to/your/repo
 ```
 
-Example output:
+Output:
 
 ```
 Query: how does user authentication work
@@ -146,75 +224,101 @@ Query: how does user authentication work
   src/auth/login.py
       [service] Handles login, JWT issuance, and session creation
       why: direct match on 'authentication' · ~1,200 tok
+
   src/models/user.py
       [model] User schema, password hashing, roles
       why: imported by login.py (weight 8) · ~800 tok
+
   src/middleware/auth.py
       [middleware] JWT validation middleware for protected routes
       why: neighbour of login.py via shared token logic · ~600 tok
 ────────────────────────────────────────────────────────────
 Selected 3 of 1,604 files (traversal cutoff 0.21)
-Tokens: 2,600 loaded vs 640,000 full repo → 99.6% saved
+Tokens: 2,600 loaded vs 641,600 full repo → 99.6% saved
 ```
 
-**Read only those files**, then work on your task. That's the whole workflow.
+Read only those files, then do the work. That is the entire workflow.
 
 ---
 
-### Step 3 — Tune depth if needed
+### 3. Control traversal depth
 
-If the first result feels incomplete (missing a file you know is relevant), increase depth:
+Use `--depth` to control how many files come back and how far the traversal reaches:
+
+| Preset | Files | Best for |
+|--------|:-----:|----------|
+| `focused` | ~5 | Pinpoint bugs, single-file changes |
+| `balanced` | ~8 | Most tasks — the default |
+| `deep` | ~12 | Multi-module tasks, unfamiliar areas |
+| `exhaustive` | ~20 | Broad refactors, "find everything touching X" |
 
 ```bash
-# Default: ~8 files
-uv run depgraph query "trace the full data pipeline" /path/to/repo
+# Default (balanced)
+uv run depgraph query "where is rate limiting implemented" /path/to/repo
 
-# More files: ~12
-uv run depgraph query "trace the full data pipeline" /path/to/repo --depth deep
+# For a complex task spanning many modules
+uv run depgraph query "trace the full request lifecycle" /path/to/repo --depth deep
 
-# Maximum: ~20 files — good for broad refactors
-uv run depgraph query "find everything touching the payment module" /path/to/repo --depth exhaustive
+# For broad impact analysis
+uv run depgraph query "everything that touches the payments module" /path/to/repo --depth exhaustive
 ```
 
 ---
 
-### Step 4 — Keep the graph current
+### 4. Keep the graph current
 
-You do **not** need to rebuild manually after editing files. Every query auto-syncs:
+Queries auto-sync before running — you do not need to rebuild manually:
 
 ```bash
-# Edit some files in your repo...
-# Then just query again — the graph reflects your changes automatically
+# Edit files...
+# Then query again. The graph reflects the new state automatically.
 uv run depgraph query "..." /path/to/repo
 ```
 
-To inspect what changed since the last build:
+To see what the sync found:
 
 ```bash
 uv run depgraph update /path/to/repo
-# Sync: 2 added, 1 changed, 0 deleted
-#   + src/api/new_endpoint.py
-#   + src/models/payment.py
-#   ~ src/auth/login.py
+```
+
+```
+Sync: 2 added, 1 changed, 0 deleted
+  + src/api/new_endpoint.py
+  + src/models/payment.py
+  ~ src/auth/login.py
+Graph now 1,606 nodes, 3,894 edges.
 ```
 
 ---
 
-### Step 5 — Explore the visual graph
+### 5. Pack mode — paste context into any LLM
 
-Open the HTML viewer anytime to see the full structure of your repo:
+`--pack` produces a single block ready to paste into Claude.ai, ChatGPT, or any LLM chat:
+
+```bash
+uv run depgraph query "how does login work" /path/to/repo --pack > context.txt
+```
+
+The block contains:
+1. One-line metadata for every file in the repo (descriptions only, no code)
+2. Full content of the selected files only
+
+---
+
+### 6. Visual graph viewer
 
 ```bash
 uv run depgraph viz /path/to/repo --open
 ```
 
-The viewer shows:
-- **Nodes** coloured by file type (service, model, config, test, etc.) and sized by how many files connect to them
-- **Edges** with thickness proportional to coupling weight — thick edges = tight dependency
-- **Click any node** to see its description, type, path, and all its connections
-- **Search box** to find specific files
+The self-contained `graph.html` works offline. It shows:
+- Nodes coloured by file type, sized by number of connections
+- Edge thickness proportional to coupling weight
+- Click any node — see its description, type, path, and all connected files
+- Search box to find specific files instantly
+- Physics toggle (force-directed layout on/off)
 
-To see a query result highlighted in the viewer:
+Highlight query results in the viewer:
 
 ```bash
 uv run depgraph query "auth flow" /path/to/repo --open
@@ -222,38 +326,7 @@ uv run depgraph query "auth flow" /path/to/repo --open
 
 ---
 
-### Pack mode — ready-to-paste context
-
-For pasting into any LLM chat (ChatGPT, Claude.ai, etc.), `--pack` emits a single block with every file's metadata plus the full contents of the selected files:
-
-```bash
-uv run depgraph query "how does login work" /path/to/repo --pack > context.txt
-```
-
-The output block is structured as:
-1. Metadata for every file in the repo (tiny — descriptions only, no code)
-2. Full content of the selected files
-
-Copy-paste the whole thing into your LLM chat and ask your question.
-
----
-
-### Using with Claude Code (MCP)
-
-If you registered the MCP server (see [Claude Code Integration](#claude-code-integration-mcp-plugin) below), Claude does this automatically inside any `claude` session:
-
-1. You type: *"Fix the login bug where tokens expire too soon"*
-2. Claude calls `depgraph_query("token expiry login bug")` → gets 6 file paths
-3. Claude reads those 6 files only
-4. Claude fixes the bug
-
-You don't do anything differently. The graph runs behind the scenes, replacing Claude's blind grep/search phase with a targeted lookup.
-
----
-
-### Check graph stats
-
-See what's in the graph: file counts by type, most-connected hub files, edge confidence:
+### 7. Graph statistics
 
 ```bash
 uv run depgraph stats /path/to/repo
@@ -263,268 +336,150 @@ uv run depgraph stats /path/to/repo
 Nodes: 1,604   Edges: 3,891
 
 File types:
+  test         401
   service      312
   model        198
   config        87
-  test         401
   other        606
 
-Most connected files (god nodes):
+Most connected files (architectural hubs):
   142 links  src/db/session.py
    98 links  src/config/settings.py
    87 links  src/models/base.py
-   ...
 ```
 
-High link-count files ("god nodes") are the architectural hubs. They appear often in query results because many other files depend on them.
-
-All outputs go to `/path/to/your/repo/.depgraph/`:
-
-| File | Contents |
-|------|----------|
-| `graph.html` | Self-contained interactive viewer — open in any browser, works offline |
-| `graph.json` | Serialized NetworkX graph (nodes + weighted edges) |
-| `report.md` | Summary: most-connected files, cross-cutting configs, counts |
-| `cache/` | Per-file extraction cache (keyed by sha256 for incremental rebuilds) |
+High-connectivity files are architectural hubs — they appear often in query results because many other files depend on them.
 
 ---
 
-## CLI Reference
+## Claude Code Integration
 
-### `depgraph build`
+The graph can be registered as an MCP (Model Context Protocol) tool server inside Claude Code. Once registered, Claude automatically calls `depgraph_query` before reading or searching any file — turning every Claude Code session into a graph-guided navigation session.
 
-Scan a repo and build the dependency graph.
-
-```bash
-depgraph build [path] [--llm] [--rebuild] [--docs] [--open]
-```
-
-| Flag | Description |
-|------|-------------|
-| `path` | Repo root to scan (default: current directory) |
-| `--llm` | Use Anthropic API for richer descriptions (needs `ANTHROPIC_API_KEY`) |
-| `--rebuild` | Ignore extraction cache and re-parse every file from scratch |
-| `--docs` | Include documentation files as graph nodes |
-| `--open` | Open `graph.html` in browser when done |
-
----
-
-### `depgraph query`
-
-Traverse the graph to find files relevant to a task.
+### Register once
 
 ```bash
-depgraph query "<task>" [path] [--depth PRESET] [--max N] [--cutoff F] [--pack] [--open] [--no-sync]
-```
-
-| Flag | Description |
-|------|-------------|
-| `query` | Task or question in natural language |
-| `path` | Repo root (default: current directory) |
-| `--depth` | Traversal reach — `focused` / `balanced` / `deep` / `exhaustive` (default: `balanced`) |
-| `--max N` | Hard cap on files returned (overrides depth preset) |
-| `--cutoff F` | Manual traversal cutoff 0–1 (default: size-adaptive). Higher = shallower |
-| `--pack` | Print all-node metadata + selected files' full contents (ready to paste to an LLM) |
-| `--open` | Regenerate `graph.html` with selected files highlighted, then open it |
-| `--no-sync` | Skip incremental sync before querying (faster; use if repo hasn't changed) |
-
-**Depth presets explained:**
-
-| Preset | Files returned | Traversal reach | Best for |
-|--------|:-:|:-:|---------|
-| `focused` | ~5 | Tightest | Pinpoint bugs, single-file questions |
-| `balanced` | ~8 | Default | Most tasks — good starting point |
-| `deep` | ~12 | Wider | Multi-module tasks, unfamiliar areas |
-| `exhaustive` | ~20 | Maximum | Broad refactors, "find everything touching X" |
-
----
-
-### `depgraph update`
-
-Incrementally sync the graph with filesystem changes (without a full rebuild).
-
-```bash
-depgraph update [path]
-```
-
-Shows added (`+`), changed (`~`), and deleted (`-`) files. Queries auto-sync, so this is mainly for inspecting what changed.
-
----
-
-### `depgraph viz`
-
-Regenerate and optionally open the HTML viewer.
-
-```bash
-depgraph viz [path] [--open]
-```
-
----
-
-### `depgraph stats`
-
-Print graph statistics: node count, edge count, file type breakdown, most-connected files, edge confidence.
-
-```bash
-depgraph stats [path]
-```
-
----
-
-## Claude Code Integration (MCP Plugin)
-
-The graph can be wired directly into your Claude Code session as an MCP tool server, giving Claude access to `depgraph_query` and `depgraph_map` in any repo it works in.
-
-### Register once (user scope — available in every repo)
-
-```bash
-# Install the MCP extra first
+# Install the MCP extra
 pip install -e '.[mcp]'
 
-# Register with Claude Code
+# Register at user scope — active in every repo, every session
 claude mcp add depgraph -s user -- /path/to/graph/.venv/bin/python -m depgraph.mcp_server
-```
 
-Verify it's registered:
-
-```bash
+# Verify
 claude mcp list
 ```
 
-### What Claude gets
+No further setup required. Open a new `claude` session and the tools are available.
 
-Three tools exposed to the agent:
+### Tools Claude gets
 
 | Tool | What it does |
 |------|-------------|
-| `depgraph_query(query, path, depth)` | Returns the minimal file set for a task — paths, descriptions, why each was chosen, token savings |
-| `depgraph_map(path)` | Structural overview: file count, type mix, top hub files — good for orientation in a new repo |
-| `depgraph_build(path, rebuild)` | Force a full graph rebuild (queries auto-build, so rarely needed) |
+| `depgraph_query(query, path, depth)` | Returns the minimal file set for a task — paths, descriptions, why each was selected, token savings vs full repo |
+| `depgraph_map(path)` | Structural overview of a repo: file count, type distribution, top hub files |
+| `depgraph_build(path, rebuild)` | Force a full graph rebuild (queries auto-build on first use, so this is rarely needed) |
 
-### Claude Code skill (auto-trigger)
+### What it looks like in practice
 
-A skill file at `~/.claude/skills/depgraph/SKILL.md` teaches Claude to call `depgraph_query` before grepping or reading broadly. When Claude encounters an unfamiliar or large repo, the skill activates automatically and routes the query through the graph first.
-
-### How queries auto-sync
-
-Every `depgraph_query` or `depgraph_map` call first runs a cheap incremental sync:
-
-1. Stat-only sweep (size + mtime) across all files — ~250ms on 1,600 files
-2. Re-hashes only files that stat-changed (sha256 confirm)
-3. Re-parses only the changed files, updates only those graph nodes + edges
-4. Returns the up-to-date graph
-
-This means after Claude edits a file, the next query automatically reflects the new state — no manual rebuild.
-
----
-
-## Incremental Sync (Under the Hood)
-
-`depgraph/incremental.py` implements a three-pass diff:
+You type in Claude Code:
 
 ```
-1. stat_only scan   →  find size/mtime changes (no reads)
-2. sha256 confirm   →  exclude touch-without-edit (no false re-parses)
-3. patch in place   →  re-parse changed files only; re-resolve ALL edges in memory
-                       (so a new file can satisfy an unchanged file's import)
+Fix the bug where JWT tokens expire immediately after login
 ```
 
-The full edge re-resolution step (pass 3) ensures consistency: if you add a new file that another file was trying to import, the edge appears without touching the importing file.
+Claude does:
+1. Calls `depgraph_query("JWT token expiry login")` → receives 6 file paths
+2. Reads those 6 files
+3. Finds the bug
+4. Fixes it
+
+Without the graph, Claude would have grepped for "JWT", "token", "expiry", "login" across 1,600 files, read a dozen wrong ones, and eventually found the right ones on turn 12.
+
+### Auto-sync during a session
+
+Every `depgraph_query` call first runs the incremental sync. So when Claude edits a file and you ask a follow-up question, the graph already reflects the change — no manual rebuild step.
 
 ---
 
-## A/B Test Findings
+## Measured Results
 
-We measured real Claude Code token usage and cost on a 1,600-file monorepo across 3 representative tasks — running each with and without the graph (via `tools/ab_token_test.py`).
+We measured real token usage and cost on a 1,600-file monorepo using `tools/ab_token_test.py` — the same task run twice: once with the graph, once without. Three representative tasks:
 
-### Summary table
+| Task type | Without graph | With graph | Cost change |
+|-----------|:---:|:---:|:---:|
+| Pinpoint ("explain auth flow") | $0.60 · 8 turns | $0.73 · 9 turns | +22% |
+| Keyword-ambiguous ("API client") | $0.45 · 5 turns | $1.01 · 12 turns | +125% |
+| Cross-cutting ("trace data pipeline") | $0.90 · **20 turns** | $0.57 · **11 turns** | **−33%** |
+| **Total** | **$1.95** | **$2.31** | **+18%** |
 
-| Task | Without graph | With graph | Change |
-|------|:-:|:-:|:-:|
-| "Explain the auth flow" (pinpoint) | $0.60 / 8 turns | $0.73 / 9 turns | +22% cost |
-| "How does the API client work?" (keyword match fails) | $0.45 / 5 turns | $1.01 / 12 turns | +125% cost |
-| "Trace the full data pipeline" (cross-cutting) | $0.90 / **20 turns** | $0.57 / **11 turns** | **−33% cost** |
-| **Monorepo total** | **$1.95** | **$2.31** | **+18% cost** |
+### What the data shows
 
-### Honest takeaway
+The graph is not a universal cost saver. It wins decisively when the task is genuinely cross-cutting — spanning multiple modules across the codebase — where the baseline wastes turns on exploration. It loses when the task is narrow enough that grep already nails it in one pass.
 
-| Situation | Graph helps? |
-|-----------|:-----------:|
-| Large repo + complex multi-file task | **Yes — fewer turns, no rabbit holes** |
-| Tracing a flow across many modules | **Yes — surfaces the right files upfront** |
-| Small repo (< 100 files) | No — overhead > savings |
-| Pinpoint task a grep already finds | No — graph adds latency, not value |
-| Broad/ambiguous query | No — over-fetches, costs more |
+| Scenario | Does the graph help? |
+|---|:---:|
+| Large repo, complex multi-file task | **Yes** |
+| Tracing flows across many modules | **Yes** |
+| Unfamiliar codebase, first orientation | **Yes** |
+| Small repo (< 100 files) | No |
+| Simple pinpoint bug | No |
+| Ambiguous broad query | No |
 
-The graph's real value is **bounding worst-case exploration** (task 3: 20 turns → 11 turns) and **never missing a file** on cross-cutting questions. It is not an average token saver — the "96% saved" figure is a theoretical ceiling (selected vs whole repo), not realized end-to-end.
+The real value of the graph is not average token reduction — it is **bounding worst-case exploration**. The 20-turn wandering session becomes an 11-turn targeted session. That consistency and predictability is what the graph is actually for.
 
-> Full numbers and analysis: [ab_test_summary.md](./ab_test_summary.md)
+> Full breakdown with per-task numbers: [ab_test_summary.md](./ab_test_summary.md)
 
 ---
 
-## Project Layout
+## Project Structure
 
 ```
 depgraph/
-├── scanner.py          Walk repo, classify file type, compute hash, record metadata
+├── cli.py              Entry point: build / query / update / viz / stats commands
+├── scanner.py          Walk repo, classify file types, compute sha256, record metadata
 ├── extractors/
-│   ├── __init__.py     Dispatch by file extension
-│   ├── python_ast.py   stdlib ast: imports, class bases, call frequency, docstring
-│   └── js_ts.py        tree-sitter (import/export/require/extends); regex fallback
-├── describe.py         Heuristic one-line descriptions (LLM-upgradable via llm.py)
-├── weights.py          Edge-weight scoring 1–10 (inheritance > named imports > config)
-├── graph_builder.py    Cross-file import resolution → NetworkX DiGraph + sync_graph()
-├── retrieve.py         Query → metadata scoring → weighted traversal → file selection
-├── incremental.py      Incremental sync: stat diff → sha confirm → patch in place
-├── store.py            graph.json serialization + sha256 extraction cache
-├── mcp_server.py       FastMCP stdio server (depgraph_query / map / build)
-├── html_export.py      Self-contained vis-network HTML viewer
-├── llm.py              Optional Anthropic API wrapper for descriptions
-├── cli.py              CLI: build / query / update / viz / stats
+│   ├── __init__.py     Dispatch table by file extension
+│   ├── python_ast.py   Python: imports, inheritance, call frequency, docstring (stdlib ast)
+│   └── js_ts.py        JS/TS: import/export/require/extends (tree-sitter; regex fallback)
+├── describe.py         Heuristic one-line descriptions from docstrings and structure
+├── weights.py          Edge weight scoring: 1–10, clamped, summed across relationship types
+├── graph_builder.py    Cross-file import resolution → NetworkX DiGraph; sync_graph() for patches
+├── retrieve.py         Query → metadata scoring → weighted traversal → file selection + savings
+├── incremental.py      Three-pass incremental sync: stat → hash → patch in place
+├── store.py            graph.json serialization; sha256 extraction cache under .depgraph/cache/
+├── mcp_server.py       FastMCP stdio server exposing depgraph_query / map / build to Claude Code
+├── html_export.py      Self-contained offline vis-network HTML viewer
+├── llm.py              Optional Anthropic API wrapper for LLM-generated descriptions
 └── templates/
-    └── viewer.html.tpl vis-network template
+    └── viewer.html.tpl vis-network HTML template
 
 tools/
-└── ab_token_test.py    A/B harness: measures real Claude Code token cost with vs. without graph
+└── ab_token_test.py    A/B harness: runs claude -p twice per task, diffs real token usage and cost
 
 examples/
-└── sample_app/         Small multi-file fixture (auth, models, routes, db, config)
+└── sample_app/         Small fixture (auth, models, routes, db, config) for testing queries
 ```
-
----
-
-## Edge Weight Reference
-
-| Relationship | Weight added |
-|---|:-:|
-| Class inheritance (`class A extends B`) | +4 |
-| Named import (symbol used frequently) | +3 |
-| Named import (symbol used occasionally) | +2 |
-| Star / namespace import | +1 |
-| Config / env dependency | capped at 4, node flagged `always_include` |
-| Bare module import | +1 |
-
-Weights are summed across all relationship types between a file pair and clamped to `[1, 10]`. During traversal, relevance decays as `score × (weight / 10)` per hop and stops when it falls below the adaptive cutoff — so only genuinely coupled files propagate relevance.
 
 ---
 
 ## Extending to New Languages
 
-Add a new extractor under `depgraph/extractors/`:
+The extractor system is designed to be extended. To add a new language:
 
-1. Create `depgraph/extractors/your_lang.py` implementing `extract(node) -> ExtractionResult`.
-2. Register the file extensions in `depgraph/extractors/__init__.py`'s dispatch table.
-3. The rest (graph building, retrieval, HTML viewer, MCP tools) works automatically.
+1. Create `depgraph/extractors/your_lang.py` implementing `extract(node) -> ExtractionResult`
+2. Register the file extensions in `depgraph/extractors/__init__.py`
+
+Everything else — graph building, retrieval, incremental sync, HTML viewer, MCP tools — works without modification.
 
 ---
 
 ## Requirements
 
-| Dependency | Required | Purpose |
-|---|:-:|---|
-| `networkx` | Yes | Graph data structure and algorithms |
-| `mcp` | For MCP server | Claude Code tool integration |
-| `tree-sitter` + `tree-sitter-languages` | Optional | Accurate JS/TS parsing |
-| `anthropic` | Optional | LLM-generated descriptions (`--llm`) |
+| Package | Required | Purpose |
+|---------|:--------:|---------|
+| `networkx` | Yes | Graph data structure and traversal |
+| `mcp` | For Claude Code integration | MCP stdio server |
+| `tree-sitter` + `tree-sitter-languages` | Optional | Accurate JS/TS dependency extraction |
+| `anthropic` | Optional | LLM-generated file descriptions |
 
-Python 3.9+. No other hard dependencies.
+Python 3.9 or later. No database, no server, no external services required for core functionality.
