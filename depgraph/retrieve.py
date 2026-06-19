@@ -43,6 +43,14 @@ DEPTH_PRESETS: dict[str, tuple[float, int, int]] = {
 }
 DEFAULT_DEPTH = "balanced"
 
+# Keywords that signal a broad, cross-cutting query — used by the dynamic
+# file-count algorithm to allow more files past the score knee.
+_BROAD_KEYWORDS = frozenset({
+    "trace", "full", "entire", "all", "everywhere", "pipeline", "flow",
+    "end-to-end", "throughout", "across", "every", "global",
+    "architecture", "overview", "structure", "system", "framework",
+})
+
 # Grammatical / question words carry no signal about *which* file is relevant —
 # without this filter, "what is gym" ranks files defining `is_updating_model`
 # above files literally named gym_*.py.
@@ -168,6 +176,16 @@ def _score_nodes(g: nx.DiGraph, query: str) -> dict[str, float]:
                         s += 0.4 * fw * idf(term)
         if s > 0:
             scores[n] = s
+
+    # Test files import everything they test, making them look highly connected.
+    # Down-weight them so they don't crowd out the real implementation files,
+    # unless the query is explicitly about tests.
+    q_lower = query.lower()
+    if "test" not in q_lower and "spec" not in q_lower:
+        for n in list(scores):
+            if g.nodes[n].get("file_type") == "test":
+                scores[n] *= 0.3
+
     return scores
 
 
@@ -217,6 +235,45 @@ def _both_neighbors(g: nx.DiGraph, n: str):
 # Public API
 # --------------------------------------------------------------------------
 
+def _dynamic_file_count(
+    ranked: list,
+    seed_count: int,
+    query: str,
+    preset_max: int,
+) -> int:
+    """Return how many files to select, driven by score drop-off and query width.
+
+    Walks the sorted score list and stops at the first significant drop
+    (next score < 60% of previous — the "knee"). Broad queries and many
+    seeds allow up to 3 extra files past the knee. Hard floor 2, ceiling 15.
+    """
+    if not ranked:
+        return 2
+
+    scores = [rel for _, (rel, _) in ranked]
+    knee = len(scores)
+    for i in range(1, len(scores)):
+        if scores[i] < scores[i - 1] * 0.60:
+            knee = i
+            break
+
+    count = max(2, knee)
+
+    q_lower = query.lower()
+    is_broad = any(kw in q_lower for kw in _BROAD_KEYWORDS) or seed_count >= 8
+    if is_broad:
+        count = min(count + 3, preset_max)
+
+    # Score floor — never include files with very low absolute relevance even if
+    # they are above the knee. Gradual score falloffs (no sharp knee) would
+    # otherwise include marginally-relevant files.
+    _SCORE_FLOOR = 0.15
+    qualified = sum(1 for _, (rel, _) in ranked if rel >= _SCORE_FLOOR)
+    count = min(count, max(2, qualified))
+
+    return min(count, 15)
+
+
 def retrieve(g: nx.DiGraph, query: str, *,
              max_files: int | None = None,
              cutoff: float | None = None,
@@ -230,8 +287,7 @@ def retrieve(g: nx.DiGraph, query: str, *,
     """
     mult, preset_max, seed_limit = DEPTH_PRESETS.get(
         depth, DEPTH_PRESETS[DEFAULT_DEPTH])
-    if max_files is None:
-        max_files = preset_max
+    _use_dynamic = max_files is None   # explicit max_files bypasses dynamic count
     if cutoff is None:
         cutoff = adaptive_cutoff(g.number_of_nodes()) * mult
     result = RetrievalResult(query=query, total_files=g.number_of_nodes(),
@@ -257,9 +313,11 @@ def retrieve(g: nx.DiGraph, query: str, *,
 
     spread = _propagate(g, seeds, cutoff)
 
-    # Rank by propagated relevance, take the best `max_files`.
+    # Rank by propagated relevance; count driven by score knee or explicit cap.
     ranked = sorted(spread.items(), key=lambda kv: kv[1][0], reverse=True)
-    chosen: list[str] = [n for n, _ in ranked[:max_files]]
+    n_files = (_dynamic_file_count(ranked, len(seeds), query, preset_max)
+               if _use_dynamic else max_files)
+    chosen: list[str] = [n for n, _ in ranked[:n_files]]
 
     # Always-include cross-cutting config that neighbours the chosen set —
     # capped so config fan-out can never dwarf the actual selection.
@@ -279,13 +337,17 @@ def retrieve(g: nx.DiGraph, query: str, *,
     for n in chosen:
         rel, why = spread.get(n, (0.0, ""))
         data = g.nodes[n]
+        tok = node_tokens(n)
+        if tok > 800:
+            why = (f"{why}  ⚠ large file (~{tok:,} tok) — "
+                   "search within it rather than reading in full")
         result.selected.append(Selected(
             path=n,
             score=round(rel, 3),
             reason=why,
             file_type=data.get("file_type", "other"),
             description=data.get("description", ""),
-            tokens=node_tokens(n),
+            tokens=tok,
         ))
 
     result.selected_tokens = sum(s.tokens for s in result.selected)

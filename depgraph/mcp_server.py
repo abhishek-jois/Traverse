@@ -1,21 +1,18 @@
-"""MCP server — exposes Dependency Graph Retrieval to Claude Code as tools.
+"""MCP server — exposes Dependency Graph Retrieval to Claude Code as a tool.
 
 Run as a stdio MCP server:
 
     python -m depgraph.mcp_server
 
-Registered with Claude Code, this gives the agent three tools:
+Registered with Claude Code, this gives the agent one tool:
 
-  * ``depgraph_query`` — the core: given a natural-language task, return the
-    handful of files that matter (with descriptions, why each was picked, and
-    how many tokens it saves versus reading the whole repo). Claude then reads
-    only those files instead of grepping blindly.
-  * ``depgraph_map``  — a cheap repo overview (size, file-type mix, the most
-    connected "god" files) for orientation.
-  * ``depgraph_build`` — (re)build the graph for a repo; queries auto-build on
-    first use, so this is only needed to force a refresh.
+  * ``depgraph_query`` — given a natural-language task, return the minimal set
+    of files that matter (with descriptions, why each was picked, and how many
+    tokens it saves versus reading the whole repo). Claude then reads only those
+    files instead of grepping blindly.
 
-The graph itself is metadata-only, so these calls stay cheap.
+The graph builds automatically on first query and stays current via incremental
+sync on every subsequent call. The graph is metadata-only, so calls are cheap.
 """
 
 from __future__ import annotations
@@ -24,7 +21,7 @@ import os
 
 from mcp.server.fastmcp import FastMCP
 
-from . import incremental, store
+from . import incremental
 from .retrieve import DEFAULT_DEPTH, DEPTH_PRESETS, retrieve
 
 mcp = FastMCP("depgraph")
@@ -55,25 +52,13 @@ def _ensure_graph(root: str):
 @mcp.tool()
 def depgraph_query(query: str, path: str = ".",
                    depth: str = DEFAULT_DEPTH, max_files: int = 0) -> str:
-    """Find the files most relevant to a task, via the dependency graph.
-
-    Use this BEFORE grepping or reading files: it returns the minimal set of
-    files you should load to work on ``query``, chosen by traversing a weighted
-    dependency graph of the repo (not just text matching). Each result lists the
-    absolute path to read, its role, a one-line description, why it was selected,
-    and the token cost — plus the % saved versus reading the whole repo.
+    """Return the minimal set of files relevant to a task, via the dependency graph.
 
     Args:
-        query: the task or question in natural language, e.g.
-            "where is JWT auth handled" or "how does the training loop work".
-        path: repo root to search (default: current directory). The graph is
-            built automatically on first use and cached.
-        depth: how far to traverse / how many files to return — one of
-            "focused" (~5 files, tightest), "balanced" (default, ~8),
-            "deep" (~12), "exhaustive" (~20). Increase when the first result
-            misses files or the task spans many modules.
-        max_files: hard override for the number of files (0 = use the depth
-            preset).
+        query: natural-language task, e.g. "how does the training loop work".
+        path: repo root (default: current directory).
+        depth: traversal depth — "focused" / "balanced" (default) / "deep" / "exhaustive".
+        max_files: hard file-count override (0 = use depth preset).
     """
     root = _resolve_root(path)
     if not os.path.isdir(root):
@@ -81,6 +66,12 @@ def depgraph_query(query: str, path: str = ".",
     if depth not in DEPTH_PRESETS:
         depth = DEFAULT_DEPTH
     g = _ensure_graph(root)
+
+    if g.number_of_nodes() < 80:
+        return (
+            f"Repo has {g.number_of_nodes()} files — small enough to navigate directly. "
+            "Use Grep or LS instead; it will be faster and cheaper than the graph for this repo size."
+        )
 
     result = retrieve(g, query, depth=depth,
                       max_files=(max_files or None))
@@ -99,70 +90,27 @@ def depgraph_query(query: str, path: str = ".",
         f"Selected {len(result.selected)} of {result.total_files} files · "
         f"{result.selected_tokens:,} tok vs {result.total_tokens:,} full repo "
         f"→ {result.savings_pct:.1f}% saved.")
-    lines.append("Read the files above; the rest of the repo is unlikely to be "
-                 "relevant to this task.")
+
+    # Inline file contents when the total is small enough — eliminates N separate
+    # Read calls, collapsing N turns of accumulated context into turn 1.
+    _INLINE_TOKEN_CAP = 6000
+    if result.selected_tokens <= _INLINE_TOKEN_CAP:
+        lines.append("File contents are included below — no separate Read calls needed.")
+        lines.append("")
+        lines.append("=== FILE CONTENTS ===")
+        for s in result.selected:
+            abs_path = os.path.join(root, s.path)
+            try:
+                with open(abs_path, "r", encoding="utf-8", errors="replace") as fh:
+                    content = fh.read()
+                lines.append(f"\n--- {abs_path} ---")
+                lines.append(content)
+            except OSError:
+                pass
+    else:
+        lines.append("Read the files above; the rest of the repo is unlikely to be "
+                     "relevant to this task.")
     return "\n".join(lines)
-
-
-@mcp.tool()
-def depgraph_map(path: str = ".", top: int = 12) -> str:
-    """Get a cheap structural overview of a repo from its dependency graph.
-
-    Returns the file count, the file-type mix, and the most connected files
-    (the architectural hubs / "god nodes"). Good for orienting yourself in an
-    unfamiliar codebase before diving in. Builds the graph if needed.
-
-    Args:
-        path: repo root (default: current directory).
-        top: how many hub files to list (default 12).
-    """
-    root = _resolve_root(path)
-    if not os.path.isdir(root):
-        return f"error: {root} is not a directory"
-    g = _ensure_graph(root)
-
-    types: dict[str, int] = {}
-    for n in g.nodes:
-        t = g.nodes[n].get("file_type", "other")
-        types[t] = types.get(t, 0) + 1
-    type_line = ", ".join(f"{t}={c}" for t, c in
-                          sorted(types.items(), key=lambda kv: -kv[1]))
-
-    hubs = sorted(g.nodes, key=lambda n: g.nodes[n].get("degree", 0),
-                  reverse=True)[:top]
-
-    lines = [f"Repository map · {root}",
-             f"{g.number_of_nodes()} files, {g.number_of_edges()} dependencies",
-             f"Types: {type_line}", "",
-             "Most connected files (start here to understand the architecture):"]
-    for n in hubs:
-        d = g.nodes[n]
-        lines.append(f"  {d.get('degree', 0):>3} links  {n}")
-        if d.get("description"):
-            lines.append(f"            {d['description']}")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-def depgraph_build(path: str = ".", rebuild: bool = False) -> str:
-    """Build or refresh the dependency graph for a repo.
-
-    Queries build the graph automatically, so call this only to force a refresh
-    after the code changed a lot. Writes ``.depgraph/graph.json`` and a
-    self-contained ``.depgraph/graph.html`` viewer.
-
-    Args:
-        path: repo root (default: current directory).
-        rebuild: ignore the extraction cache and re-parse every file.
-    """
-    root = _resolve_root(path)
-    if not os.path.isdir(root):
-        return f"error: {root} is not a directory"
-    g = incremental.full_build(root, rebuild=rebuild)
-    out = store.out_dir(root)
-    return (f"Built dependency graph for {root}: "
-            f"{g.number_of_nodes()} files, {g.number_of_edges()} dependencies.\n"
-            f"Viewer: {os.path.join(out, 'graph.html')}")
 
 
 def main() -> None:

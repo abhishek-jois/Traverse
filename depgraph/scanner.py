@@ -24,6 +24,7 @@ EXCLUDED_DIRS = {
     "dist", "build", "out", ".next", ".nuxt", "target",
     ".idea", ".vscode", ".gradle",
     "coverage", ".nyc_output",
+    "migrations", "alembic",  # auto-generated DB migration files
     ".depgraph",  # our own output
 }
 
@@ -33,6 +34,8 @@ EXCLUDED_FILE_GLOBS = [
     "*.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock",
     "*.pyc", "*.pyo", "*.so", "*.o", "*.a", "*.dll", "*.dylib",
     "*.d.ts",  # type stubs add edges but little meaning
+    "*_pb2.py", "*_pb2_grpc.py",           # protobuf generated files
+    "*.generated.ts", "*.generated.js",    # code-gen output
 ]
 
 # Extensions we parse for dependencies (the "code" languages).

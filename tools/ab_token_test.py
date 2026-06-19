@@ -43,9 +43,10 @@ DEP_CONFIG = {
 EMPTY_CONFIG = {"mcpServers": {}}
 
 NUDGE = (
-    "A dependency-graph MCP tool is available: depgraph_query(query, path) and "
-    "depgraph_map(path). Before reading or grepping, call depgraph_query with "
-    "the user's task to get the relevant files, then read only those."
+    "A dependency-graph MCP tool is available: depgraph_query(query, path). "
+    "Before reading or grepping anything, call depgraph_query ONCE with the "
+    "user's task to get the relevant files, then read ONLY those files. "
+    "Do not re-query for the same task and do not open files not returned by the tool."
 )
 
 
@@ -56,7 +57,7 @@ def _run(repo: str, prompt: str, cfg_path: str, *, with_graph: bool,
     # it; anything else is denied. This keeps the harness safe and non-autonomous.
     allowed = ["Read", "Grep", "Glob", "LS"]
     if with_graph:
-        allowed += ["mcp__depgraph__depgraph_query", "mcp__depgraph__depgraph_map"]
+        allowed += ["mcp__depgraph__depgraph_query"]
     cmd = [
         "claude", "-p", prompt,
         "--output-format", "json",

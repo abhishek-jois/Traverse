@@ -104,7 +104,13 @@ def build_graph(nodes: list[FileNode],
     for n in nodes:
         g.add_node(n.path, **n.to_dict())
     for (src, dst), (rel, exact) in rels.items():
-        g.add_edge(src, dst, **_edge_attrs(rel, exact))
+        attrs = _edge_attrs(rel, exact)
+        # __init__.py files re-export everything — cap their edge weights so they
+        # don't act as false hubs connecting unrelated modules.
+        if (src.rsplit("/", 1)[-1] == "__init__.py"
+                or dst.rsplit("/", 1)[-1] == "__init__.py"):
+            attrs["weight"] = min(attrs["weight"], 1)
+        g.add_edge(src, dst, **attrs)
 
     _annotate_degree(g)
     return g
@@ -146,6 +152,10 @@ def sync_graph(g: nx.DiGraph, nodes: list[FileNode],
     index = _Index(nodes)
     rels = _resolve_all(nodes, extracts, index)
     new_edges = {key: _edge_attrs(rel, exact) for key, (rel, exact) in rels.items()}
+    for (src, dst), attrs in new_edges.items():
+        if (src.rsplit("/", 1)[-1] == "__init__.py"
+                or dst.rsplit("/", 1)[-1] == "__init__.py"):
+            attrs["weight"] = min(attrs["weight"], 1)
 
     old_keys = set(g.edges())
     new_keys = set(new_edges)
