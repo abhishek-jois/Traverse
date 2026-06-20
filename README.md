@@ -352,6 +352,27 @@ High-connectivity files are architectural hubs — they appear often in query re
 
 ---
 
+## MCP Compatibility
+
+MCP (Model Context Protocol) is an open standard — not Claude-exclusive. Any tool that implements the MCP client spec can use this server without any code changes on your side.
+
+| Tool | MCP Support | Works with depgraph? |
+|------|:-----------:|:--------------------:|
+| Claude Code (CLI) | Native | ✅ Yes |
+| Claude Desktop | Native | ✅ Yes |
+| Cursor | Added MCP support | ✅ Yes |
+| Windsurf (Codeium) | Added MCP support | ✅ Yes |
+| Zed editor | Added MCP support | ✅ Yes |
+| Continue.dev | Added MCP support | ✅ Yes |
+| GitHub Copilot | No MCP (own extension model) | ❌ No |
+| OpenAI Codex CLI | No MCP | ❌ No |
+| OpenAI API (direct) | No MCP | ❌ Need bridge |
+| Gemini API (direct) | No MCP | ❌ Need bridge |
+
+The config format differs slightly per tool but the content is the same — just point it at `python -m depgraph.mcp_server`. See your tool's MCP documentation for the exact config file location.
+
+---
+
 ## Claude Code Integration
 
 The graph can be registered as an MCP (Model Context Protocol) tool server inside Claude Code. Once registered, Claude automatically calls `depgraph_query` before reading or searching any file — turning every Claude Code session into a graph-guided navigation session.

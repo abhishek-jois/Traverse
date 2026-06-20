@@ -47,6 +47,16 @@ _CLASS_EXTENDS_RE = re.compile(
 _LEADING_COMMENT_RE = re.compile(r"^\s*/\*\*?(?P<body>.*?)\*/", re.DOTALL)
 _LINE_COMMENT_RE = re.compile(r"^\s*//(?P<body>.*)$", re.MULTILINE)
 
+# HTTP call detection — fetch/axios/superagent patterns.
+_HTTP_CALL_RE = re.compile(
+    r"""(?:fetch|axios\.(?:get|post|put|delete|patch)|superagent\.(?:get|post|put|delete|patch))\s*\(\s*['"]([^'"?#\s]+)['"]""",
+    re.MULTILINE,
+)
+_AXIOS_URL_RE = re.compile(
+    r"""url\s*:\s*['"]([^'"?#\s]+)['"]""",
+    re.MULTILINE,
+)
+
 
 def _parse_clause(clause: str) -> list[str]:
     """Turn an import clause into the local names it binds."""
@@ -149,6 +159,21 @@ def _extract_regex(text: str) -> ExtractResult:
         # subtract the binding occurrence itself
         counts[name] = max(0, n - 1)
     res.usage_counts = counts
+
+    # HTTP call detection — only keep paths starting with '/' to avoid matching
+    # local variable names or relative module paths.
+    seen: set[str] = set()
+    for m in _HTTP_CALL_RE.finditer(text):
+        path = m.group(1)
+        if path.startswith("/") and path not in seen:
+            res.http_calls.append(path)
+            seen.add(path)
+    for m in _AXIOS_URL_RE.finditer(text):
+        path = m.group(1)
+        if path.startswith("/") and path not in seen:
+            res.http_calls.append(path)
+            seen.add(path)
+
     return res
 
 

@@ -8,6 +8,7 @@ third-party packages are dropped — we only graph files that exist in the repo.
 
 from __future__ import annotations
 
+import re as _re
 import sys
 
 import networkx as nx
@@ -112,6 +113,7 @@ def build_graph(nodes: list[FileNode],
             attrs["weight"] = min(attrs["weight"], 1)
         g.add_edge(src, dst, **attrs)
 
+    _add_http_edges(g)
     _annotate_degree(g)
     return g
 
@@ -158,6 +160,7 @@ def sync_graph(g: nx.DiGraph, nodes: list[FileNode],
             attrs["weight"] = min(attrs["weight"], 1)
 
     old_keys = set(g.edges())
+
     new_keys = set(new_edges)
     removed_edges = old_keys - new_keys
     for src, dst in removed_edges:
@@ -168,6 +171,7 @@ def sync_graph(g: nx.DiGraph, nodes: list[FileNode],
             added_edges += 1
         g.add_edge(src, dst, **attrs)   # overwrites attrs if the edge existed
 
+    _add_http_edges(g)
     _annotate_degree(g)
     return {
         "nodes_added": len(added),
@@ -182,6 +186,61 @@ def _annotate_degree(g: nx.DiGraph) -> None:
     """Store total degree on each node (used to size the visualisation)."""
     for n in g.nodes:
         g.nodes[n]["degree"] = g.in_degree(n) + g.out_degree(n)
+
+
+# --------------------------------------------------------------------------
+# Cross-language HTTP edge detection
+# --------------------------------------------------------------------------
+
+_PARAM_NORM_RE = _re.compile(r"/\{[^}]+\}|/:[a-zA-Z_]\w*|/\d+(?=/|$)")
+
+
+def _norm_route(path: str) -> str:
+    """Normalise path parameters to * for route matching."""
+    return _PARAM_NORM_RE.sub("/*", path).rstrip("/") or "/"
+
+
+def _routes_match(server: str, client: str) -> bool:
+    """Return True if the client call path maps onto the server route."""
+    s_parts = server.split("/")
+    c_parts = client.split("/")
+    if len(s_parts) < 2:   # skip bare "/" — too ambiguous
+        return False
+    if len(c_parts) < len(s_parts):
+        return False
+    return all(sp == "*" or sp == cp for sp, cp in zip(s_parts, c_parts))
+
+
+def _add_http_edges(g: nx.DiGraph) -> None:
+    """Add weight-4 cross-language edges where HTTP calls match route decorators.
+
+    Scans Python files for exposed routes (FastAPI/Flask decorators) and
+    JS/TS files for outgoing fetch/axios calls, then links matching pairs.
+    This bridges the Python↔TypeScript boundary that import-based edges cannot.
+    """
+    server_index: list[tuple[str, str]] = []   # (normalised_route, node_path)
+    for n in g.nodes:
+        for route in g.nodes[n].get("http_routes", []):
+            server_index.append((_norm_route(route), n))
+
+    if not server_index:
+        return
+
+    for n in g.nodes:
+        for call in g.nodes[n].get("http_calls", []):
+            call_norm = _norm_route(call)
+            for srv_norm, srv_node in server_index:
+                if srv_node == n:
+                    continue
+                if _routes_match(srv_norm, call_norm):
+                    if g.has_edge(n, srv_node):
+                        g[n][srv_node]["weight"] = min(10, g[n][srv_node]["weight"] + 1)
+                        rels = g[n][srv_node].get("relations", [])
+                        if "http" not in rels:
+                            g[n][srv_node]["relations"] = rels + ["http"]
+                    else:
+                        g.add_edge(n, srv_node, weight=4, relations=["http"],
+                                   confidence="inferred", symbol_count=0, usage=1)
 
 
 # --------------------------------------------------------------------------

@@ -61,6 +61,58 @@ class SyncReport:
 # shared helpers
 # --------------------------------------------------------------------------
 
+def _write_repo_map(g: nx.DiGraph, root: str) -> None:
+    """Write .depgraph/repo_map.md — a static orientation file for Claude.
+
+    Claude reads this ONCE per session; from turn 2 onward it is a cheap
+    cache_read.  This gives codebase orientation without any graph call.
+    """
+    node_count = g.number_of_nodes()
+    tier = "small" if node_count < 80 else ("medium" if node_count <= 500 else "large")
+    langs = sorted({g.nodes[n].get("language", "")
+                    for n in g.nodes
+                    if g.nodes[n].get("language") not in ("config", "doc", "other", None, "")})
+    basename = os.path.basename(root)
+
+    lines: list[str] = [
+        f"# Repo Map — {basename} ({node_count} files · {', '.join(langs) or 'mixed'})",
+        f"# Size tier: {tier}  (small<80 · medium 80-500 · large>500)",
+        "",
+    ]
+    entrypoints = [n for n in g.nodes if g.nodes[n].get("file_type") == "entrypoint"]
+    # Cap configs to the 20 shallowest (root-level first) to avoid flooding
+    # the section when a large repo has hundreds of per-agent YAML/JSON files.
+    all_configs = sorted(
+        [n for n in g.nodes if g.nodes[n].get("always_include")],
+        key=lambda n: (n.count("/"), n),
+    )[:20]
+    configs = all_configs
+    ep_set = set(entrypoints) | set(configs)
+    k = min(50, max(20, node_count // 20))
+    hubs = sorted(
+        [n for n in g.nodes if g.nodes[n].get("file_type") != "test" and n not in ep_set],
+        key=lambda n: g.nodes[n].get("degree", 0), reverse=True,
+    )[:k]
+
+    if entrypoints:
+        lines += ["## Entrypoints"] + [
+            f"- {n} — {g.nodes[n].get('description', '')}" for n in sorted(entrypoints)
+        ] + [""]
+    if configs:
+        lines += ["## Configuration (always loaded)"] + [
+            f"- {n} — {g.nodes[n].get('description', '')}" for n in sorted(configs)
+        ] + [""]
+    if hubs:
+        lines += [f"## Key files (top {len(hubs)} by connections)"] + [
+            f"- {n} — {g.nodes[n].get('description', '')}  [{g.nodes[n].get('degree', 0)} links]"
+            for n in hubs
+        ] + [""]
+
+    out_path = os.path.join(store.out_dir(root), "repo_map.md")
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
 def _extract_for(root: str, node, *, force: bool) -> ExtractResult:
     cached = None if force else store.cache_get(root, node.sha256)
     if cached is not None:
@@ -86,11 +138,14 @@ def full_build(root: str, *, rebuild: bool = False, include_docs: bool = False,
     for n in nodes:
         res = _extract_for(root, n, force=rebuild)
         n.symbols = res.defined_symbols[:12]
+        n.http_routes = res.http_routes
+        n.http_calls = res.http_calls
         extracts[n.path] = res
     describe.describe_all([(n, extracts[n.path]) for n in nodes])
     g = graph_builder.build_graph(nodes, extracts)
     store.save_graph(g, root,
                      meta={"languages": sorted({n.language for n in nodes})})
+    _write_repo_map(g, root)
     if write_html:
         _write_html(g, root)
     return g
@@ -155,6 +210,8 @@ def sync(root: str, *, include_docs: bool = False,
     for n in current:
         res = _extract_for(root, n, force=(n.path in dirty))
         n.symbols = res.defined_symbols[:12]
+        n.http_routes = res.http_routes
+        n.http_calls = res.http_calls
         extracts[n.path] = res
 
     # Describe only the new/changed files; unchanged nodes keep their text.
@@ -164,6 +221,7 @@ def sync(root: str, *, include_docs: bool = False,
         g, current, extracts, added=added, changed=changed, deleted=deleted)
     store.save_graph(g, root,
                      meta={"languages": sorted({n.language for n in current})})
+    _write_repo_map(g, root)
     if write_html:
         _write_html(g, root)
 

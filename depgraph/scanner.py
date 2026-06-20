@@ -72,7 +72,9 @@ class FileNode:
     sha256: str = ""
     description: str = ""           # filled in later by describe.py
     always_include: bool = False    # cross-cutting (config/env/constants)
-    symbols: list[str] = field(default_factory=list)   # exported/defined names
+    symbols: list[str] = field(default_factory=list)    # exported/defined names
+    http_routes: list[str] = field(default_factory=list)  # HTTP paths this file exposes
+    http_calls: list[str] = field(default_factory=list)   # HTTP URLs this file calls
 
     def to_dict(self) -> dict:
         return {
@@ -85,6 +87,8 @@ class FileNode:
             "description": self.description,
             "always_include": self.always_include,
             "symbols": self.symbols,
+            "http_routes": self.http_routes,
+            "http_calls": self.http_calls,
         }
 
 

@@ -8,8 +8,19 @@ classes, how often each imported name is referenced, and the module docstring.
 from __future__ import annotations
 
 import ast
+import re
 
 from . import ExtractResult, Import
+
+# Regex post-pass for HTTP route decorators (FastAPI / Flask / Starlette).
+_ROUTE_RE = re.compile(
+    r'@\w+\.(?:get|post|put|delete|patch|options|head)\s*\(\s*["\']([^"\']+)["\']',
+    re.MULTILINE | re.IGNORECASE,
+)
+_FLASK_ROUTE_RE = re.compile(
+    r'@\w+\.route\s*\(\s*["\']([^"\']+)["\']',
+    re.MULTILINE,
+)
 
 
 def extract(text: str) -> ExtractResult:
@@ -73,6 +84,20 @@ def extract(text: str) -> ExtractResult:
             if root and root in binding_to_import:
                 counts[root] = counts.get(root, 0) + 1
     res.usage_counts = counts
+
+    # HTTP route detection — regex post-pass (no extra AST walk needed).
+    seen: set[str] = set()
+    for m in _ROUTE_RE.finditer(text):
+        path = m.group(1)
+        if path not in seen:
+            res.http_routes.append(path)
+            seen.add(path)
+    for m in _FLASK_ROUTE_RE.finditer(text):
+        path = m.group(1)
+        if path not in seen:
+            res.http_routes.append(path)
+            seen.add(path)
+
     return res
 
 

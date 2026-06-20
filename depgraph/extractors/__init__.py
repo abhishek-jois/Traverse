@@ -34,6 +34,8 @@ class ExtractResult:
     docstring: str = ""                                         # module docstring / leading comment
     has_inheritance: bool = False
     error: str = ""                                            # non-empty if parsing failed
+    http_routes: list[str] = field(default_factory=list)       # HTTP paths this file exposes
+    http_calls: list[str] = field(default_factory=list)        # HTTP URLs this file calls
 
 
 def extract(node: FileNode, text: str | None = None) -> ExtractResult:

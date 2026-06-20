@@ -48,6 +48,8 @@ def cmd_build(args: argparse.Namespace) -> int:
             res = extract(node)
             store.cache_put(root, node.sha256, res)
         node.symbols = res.defined_symbols[:12]
+        node.http_routes = res.http_routes
+        node.http_calls = res.http_calls
         extracts[node.path] = res
     print(f"  parsed {len(nodes) - reused}, reused {reused} from cache")
 
@@ -66,12 +68,14 @@ def cmd_build(args: argparse.Namespace) -> int:
     print(f"  {g.number_of_nodes()} nodes, {g.number_of_edges()} edges")
 
     store.save_graph(g, root, meta={"languages": sorted({n.language for n in nodes})})
+    incremental._write_repo_map(g, root)
     html_path = os.path.join(store.out_dir(root), "graph.html")
     html_export.export_html(g, html_path, title=f"Dependency Graph · {os.path.basename(root)}")
     _write_report(g, root)
 
     print(f"\n✓ graph.json  → {os.path.join(store.OUT_DIRNAME, 'graph.json')}")
     print(f"✓ graph.html  → {os.path.join(store.OUT_DIRNAME, 'graph.html')}  (open in a browser)")
+    print(f"✓ repo_map.md → {os.path.join(store.OUT_DIRNAME, 'repo_map.md')}")
     print(f"✓ report.md   → {os.path.join(store.OUT_DIRNAME, 'report.md')}")
     if args.open:
         webbrowser.open(f"file://{html_path}")

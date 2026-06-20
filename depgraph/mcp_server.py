@@ -80,36 +80,31 @@ def depgraph_query(query: str, path: str = ".",
                 f"(searched {result.total_files} files; try different terms "
                 f"or a deeper depth)")
 
-    lines = [f"Relevant files for: {query!r}  (depth={depth})", ""]
+    # Compress response to paths + 5-word hint only.
+    # Tool responses re-process every turn as cache-read tokens — keeping them
+    # small is the single biggest lever for reducing cost on long sessions.
+    _LARGE_REPO_THRESHOLD = 300   # above this node count, never inline content
+    node_count = g.number_of_nodes()
+    lines = [f"Files for: {query!r}  ({len(result.selected)} found)"]
     for s in result.selected:
-        lines.append(os.path.join(root, s.path))
-        lines.append(f"    [{s.file_type}] {s.description}")
-        lines.append(f"    why: {s.reason}  · ~{s.tokens} tok")
-        lines.append("")
-    lines.append(
-        f"Selected {len(result.selected)} of {result.total_files} files · "
-        f"{result.selected_tokens:,} tok vs {result.total_tokens:,} full repo "
-        f"→ {result.savings_pct:.1f}% saved.")
+        abs_path = os.path.join(root, s.path)
+        hint = " ".join(s.description.split()[:5]).rstrip(".,;:")
+        lines.append(f"{abs_path}  # {hint}")
+    lines.append(f"Read these files. (~{result.selected_tokens:,} tok of {result.total_tokens:,})")
 
-    # Inline file contents when the total is small enough — eliminates N separate
-    # Read calls, collapsing N turns of accumulated context into turn 1.
-    _INLINE_TOKEN_CAP = 6000
-    if result.selected_tokens <= _INLINE_TOKEN_CAP:
-        lines.append("File contents are included below — no separate Read calls needed.")
-        lines.append("")
-        lines.append("=== FILE CONTENTS ===")
+    # Inline file contents only for small repos where sessions are short — on
+    # large repos the inlined content re-processes every turn and costs more
+    # than the Read calls it saves.
+    _INLINE_CAP = 3000 if node_count <= _LARGE_REPO_THRESHOLD else 0
+    if _INLINE_CAP and result.selected_tokens <= _INLINE_CAP:
+        lines.append("\n=== FILE CONTENTS ===")
         for s in result.selected:
             abs_path = os.path.join(root, s.path)
             try:
                 with open(abs_path, "r", encoding="utf-8", errors="replace") as fh:
-                    content = fh.read()
-                lines.append(f"\n--- {abs_path} ---")
-                lines.append(content)
+                    lines.append(f"\n--- {abs_path} ---\n{fh.read()}")
             except OSError:
                 pass
-    else:
-        lines.append("Read the files above; the rest of the repo is unlikely to be "
-                     "relevant to this task.")
     return "\n".join(lines)
 
 
