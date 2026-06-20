@@ -81,6 +81,7 @@ image.png
 # ── A/B test run output ───────────────────────────────────────────────────────
 tools/*.log
 tools/*.json
+*ab_test_summary.md
 
 # ── pip internals ─────────────────────────────────────────────────────────────
 pip-wheel-metadata/
