@@ -45,13 +45,17 @@ EMPTY_CONFIG = {"mcpServers": {}}
 NUDGE = (
     "A dependency-graph MCP tool is available: depgraph_query(query, path). "
     "Before reading or grepping anything, call depgraph_query ONCE with the "
-    "user's task to get the relevant files, then read ONLY those files. "
-    "Do not re-query for the same task and do not open files not returned by the tool."
+    "user's task. Its response inlines a '=== CODE ===' section with the relevant "
+    "code already extracted (a per-file outline plus the relevant symbol bodies) — "
+    "answer from that inlined code directly. Only use Read on a listed file if its "
+    "slice is marked '(truncated)' or its outline names a symbol you need that was "
+    "not inlined. Do not re-query for the same task and do not open files not returned "
+    "by the tool."
 )
 
 
 def _run(repo: str, prompt: str, cfg_path: str, *, with_graph: bool,
-         max_turns: int, timeout: int) -> dict:
+         max_turns: int, timeout: int, model: str) -> dict:
     # Read-only allowlist only — no bypass of approval gates, no edit/write/bash.
     # The nested agent can navigate (read/grep/glob) and, with the graph, query
     # it; anything else is denied. This keeps the harness safe and non-autonomous.
@@ -60,6 +64,7 @@ def _run(repo: str, prompt: str, cfg_path: str, *, with_graph: bool,
         allowed += ["mcp__depgraph__depgraph_query"]
     cmd = [
         "claude", "-p", prompt,
+        "--model", model,
         "--output-format", "json",
         "--strict-mcp-config", "--mcp-config", cfg_path,
         "--allowedTools", *allowed,
@@ -108,8 +113,12 @@ def main() -> int:
     ap.add_argument("prompts", nargs="+")
     ap.add_argument("--max-turns", type=int, default=15)
     ap.add_argument("--timeout", type=int, default=600)
+    # Default to Haiku so A/B sweeps are cheap enough to run many of them.
+    ap.add_argument("--model", default="claude-haiku-4-5-20251001",
+                    help="model id passed to `claude -p` for both arms (default: Haiku 4.5)")
     args = ap.parse_args()
     repo = os.path.abspath(args.repo)
+    print(f"model: {args.model}", flush=True)
 
     with tempfile.TemporaryDirectory() as td:
         dep = os.path.join(td, "dep.json")
@@ -124,10 +133,12 @@ def main() -> int:
             print(f"\n{'='*70}\nTASK: {prompt}\n{'='*70}", flush=True)
             print("  running WITHOUT graph …", flush=True)
             wo = _usage(_run(repo, prompt, emp, with_graph=False,
-                             max_turns=args.max_turns, timeout=args.timeout))
+                             max_turns=args.max_turns, timeout=args.timeout,
+                             model=args.model))
             print("  running WITH graph …", flush=True)
             wg = _usage(_run(repo, prompt, dep, with_graph=True,
-                             max_turns=args.max_turns, timeout=args.timeout))
+                             max_turns=args.max_turns, timeout=args.timeout,
+                             model=args.model))
 
             def row(label, k):
                 a, b = wg[k], wo[k]

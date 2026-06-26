@@ -233,6 +233,55 @@ def _write_report(g, root: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# docker
+# --------------------------------------------------------------------------
+
+def cmd_docker(args: argparse.Namespace) -> int:
+    import shutil
+    import subprocess
+    import tempfile
+
+    if shutil.which("docker") is None:
+        print("error: docker not found in PATH", file=sys.stderr)
+        return 2
+
+    container = args.container
+    src_path = args.src_path.rstrip("/") or "/app"
+
+    # Verify container is running before copying anything out.
+    check = subprocess.run(
+        ["docker", "inspect", "--format", "{{.State.Running}}", container],
+        capture_output=True, text=True,
+    )
+    if check.returncode != 0 or check.stdout.strip() != "true":
+        print(f"error: container '{container}' is not running or does not exist",
+              file=sys.stderr)
+        return 2
+
+    tmp = tempfile.mkdtemp(prefix="depgraph_docker_")
+    print(f"Extracting {container}:{src_path} → {tmp} …")
+    r = subprocess.run(
+        ["docker", "cp", f"{container}:{src_path}", tmp],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        print(f"error: docker cp failed:\n{r.stderr.strip()}", file=sys.stderr)
+        return 2
+
+    # docker cp puts the directory itself (basename) into tmp.
+    extracted = os.path.join(tmp, os.path.basename(src_path))
+    if not os.path.isdir(extracted):
+        extracted = tmp  # fallback: cp may have flattened the layout
+
+    print(f"Building graph for {container}:{src_path} …")
+    g = incremental.full_build(extracted, rebuild=args.rebuild, write_html=True)
+    print(f"  {g.number_of_nodes()} nodes, {g.number_of_edges()} edges")
+    print(f"\n✓ Graph stored at: {os.path.join(extracted, store.OUT_DIRNAME)}")
+    print(f"  Query it with:  depgraph query \"...\" {extracted}")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # arg parsing
 # --------------------------------------------------------------------------
 
@@ -280,6 +329,14 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("stats", help="print graph statistics")
     s.add_argument("path", nargs="?", default=".")
     s.set_defaults(func=cmd_stats)
+
+    d = sub.add_parser("docker", help="build graph from code inside a running Docker container")
+    d.add_argument("container", help="container name or ID")
+    d.add_argument("src_path", nargs="?", default="/app",
+                   help="path inside the container to scan (default: /app)")
+    d.add_argument("--rebuild", action="store_true", help="ignore the extraction cache")
+    d.set_defaults(func=cmd_docker)
+
     return p
 
 

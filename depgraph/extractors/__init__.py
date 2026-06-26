@@ -51,4 +51,13 @@ def extract(node: FileNode, text: str | None = None) -> ExtractResult:
     if node.language in ("javascript", "typescript"):
         from . import js_ts
         return js_ts.extract(text)
+    if node.language == "go":
+        from . import go_lang
+        return go_lang.extract(text)
+    if node.language == "rust":
+        from . import rust_lang
+        return rust_lang.extract(text)
+    if node.language == "java":
+        from . import java_lang
+        return java_lang.extract(text)
     return ExtractResult()

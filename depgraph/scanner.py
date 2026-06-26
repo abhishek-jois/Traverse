@@ -47,6 +47,9 @@ CODE_EXTENSIONS = {
     ".cjs": "javascript",
     ".ts": "typescript",
     ".tsx": "typescript",
+    ".go": "go",
+    ".rs": "rust",
+    ".java": "java",
 }
 
 # Extensions we still track as nodes (so they are *visible*) but do not parse.

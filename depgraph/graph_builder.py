@@ -29,11 +29,31 @@ class _Index:
         self.by_noext: dict[str, str] = {}          # "src/models/user" -> path
         self.by_dotted: dict[str, str] = {}         # "models.user" -> path (py)
         self.by_basename: dict[str, list[str]] = {} # "user" -> [paths]
+        # Slash-path suffixes for languages whose imports mirror the directory
+        # layout (Java packages, Rust crate paths): "com/x/Foo" -> [paths].
+        self.path_suffix: dict[str, list[str]] = {}
+        # Directory-path suffixes + the files in each dir, for Go package imports.
+        self.dir_suffix: dict[str, str] = {}        # "internal/auth" -> "a/b/internal/auth"
+        self.dir_files: dict[str, list[str]] = {}   # dir -> [paths of code files in it]
         for n in nodes:
             noext = _strip_ext(n.path)
             self.by_noext[noext] = n.path
             base = noext.rsplit("/", 1)[-1]
             self.by_basename.setdefault(base, []).append(n.path)
+
+            d = n.path.rsplit("/", 1)[0] if "/" in n.path else ""
+            self.dir_files.setdefault(d, []).append(n.path)
+
+            if n.language in ("java", "rust"):
+                parts = noext.split("/")
+                for i in range(len(parts)):
+                    self.path_suffix.setdefault("/".join(parts[i:]), []).append(n.path)
+            elif n.language == "go":
+                dparts = d.split("/") if d else []
+                for i in range(len(dparts)):
+                    # last writer wins; favours the first (shallowest) registrant
+                    self.dir_suffix.setdefault("/".join(dparts[i:]), d)
+
             # Python dotted suffixes — only .py files can be Python import
             # targets (otherwise `import json` matches a data file json.json).
             if n.language != "python":
@@ -255,7 +275,73 @@ def _resolve(node: FileNode, imp: Import, index: _Index) -> tuple[list[str], boo
     """
     if node.language == "python":
         return _resolve_python(node, imp, index)
+    if node.language == "go":
+        return _resolve_go(node, imp, index)
+    if node.language == "rust":
+        return _resolve_rust(node, imp, index)
+    if node.language == "java":
+        return _resolve_java(node, imp, index)
     return _resolve_js(node, imp, index)
+
+
+def _resolve_java(node: FileNode, imp: Import, index: _Index) -> tuple[list[str], bool]:
+    """Java imports mirror the package directory: ``a.b.C`` -> ``…/a/b/C.java``."""
+    mod = imp.module
+    if mod.endswith(".*"):                       # wildcard: link the whole package dir
+        pkg = mod[:-2].replace(".", "/")
+        d = index.dir_suffix.get(pkg)
+        files = index.dir_files.get(d, []) if d is not None else []
+        return ([p for p in files if p != node.path], True)
+    path = mod.replace(".", "/")
+    hits = index.path_suffix.get(path)
+    return ([hits[0]], True) if hits else ([], True)
+
+
+def _resolve_go(node: FileNode, imp: Import, index: _Index) -> tuple[list[str], bool]:
+    """Go imports name a package directory; link to the .go files in it.
+
+    The module prefix (from go.mod) is unknown, so we match the import-path
+    suffix against an internal directory, longest suffix first. Stdlib paths
+    (``fmt``, ``net/http``) match nothing internal and drop out.
+    """
+    parts = imp.module.split("/")
+    for i in range(len(parts)):
+        suffix = "/".join(parts[i:])
+        # Require ≥2 segments (or a 1-segment import) to avoid matching a common
+        # leaf dir name like "util" by accident.
+        if len(suffix.split("/")) < 2 and len(parts) > 1:
+            continue
+        d = index.dir_suffix.get(suffix)
+        if d is not None:
+            files = [p for p in index.dir_files.get(d, [])
+                     if p != node.path and p.endswith(".go")]
+            if files:
+                return (files[:12], i == 0)      # exact only when the full path matched
+    return [], True
+
+
+def _resolve_rust(node: FileNode, imp: Import, index: _Index) -> tuple[list[str], bool]:
+    """Resolve ``mod foo;`` (sibling file) and ``use crate::a::b`` (path match)."""
+    d = node.path.rsplit("/", 1)[0] if "/" in node.path else ""
+    if "::" not in imp.module:                   # `mod foo;`
+        name = imp.module
+        for cand in (f"{d}/{name}" if d else name, f"{d}/{name}/mod" if d else f"{name}/mod"):
+            hit = index.by_noext.get(cand)
+            if hit and hit != node.path:
+                return [hit], True
+        return [], True
+    # `use crate::a::b::C` — match the path, then the path without its last
+    # segment (which is usually an item, not a file).
+    rest = [p for p in imp.module.split("::")[1:] if p not in ("super", "self")]
+    for cand in ("/".join(rest), "/".join(rest[:-1])):
+        if not cand:
+            continue
+        hits = index.path_suffix.get(cand)
+        if hits:
+            picked = [p for p in hits if p != node.path]
+            if picked:
+                return [picked[0]], False
+    return [], True
 
 
 def _resolve_python(node: FileNode, imp: Import, index: _Index) -> tuple[list[str], bool]:

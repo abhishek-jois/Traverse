@@ -50,7 +50,7 @@ Scanner          Walks every file. Records path, type, size, hash.
     ▼
 Extractor        Per-file: extracts imports, function calls,
                  class inheritance, config references.
-                 Python via stdlib ast. JS/TS via tree-sitter (regex fallback).
+                 Python (stdlib ast), JS/TS, Go, Rust, Java.
     │
     ▼
 Graph Builder    Resolves cross-file relationships into a directed graph.
@@ -326,7 +326,48 @@ uv run depgraph query "auth flow" /path/to/repo --open
 
 ---
 
-### 7. Graph statistics
+### 7. Docker containers
+
+If your code runs inside a running Docker container, depgraph can still reach it:
+
+**Option 1 — `depgraph docker` command (recommended)**
+
+```bash
+# Scans /app inside the container (default path)
+depgraph docker my_container
+
+# Scan a different path inside the container
+depgraph docker my_container /src
+
+# Then query as normal — graph is stored in the extracted temp directory
+depgraph query "how does auth work" /tmp/depgraph_docker_xxx/app
+```
+
+Internally this runs `docker cp` to extract the code, builds the graph on the extracted copy, and prints the exact query command to use.
+
+**Option 2 — Volume-mounted code (zero extra steps)**
+
+```bash
+# Code is already on the host via -v mount:
+docker run -v /local/code:/app myimage
+
+# Scan from the host — depgraph doesn't know or care it's also in a container
+depgraph build /local/code
+```
+
+**Option 3 — Run depgraph inside the container**
+
+```bash
+docker exec my_container pip install depgraph-retrieval
+docker exec my_container python -m depgraph build /app
+docker cp my_container:/app/.depgraph ./   # pull the graph out
+```
+
+> **What depgraph cannot help with:** runtime debugging — container logs, running processes, live environment variables, network traffic between containers. For those, use `docker exec`, `docker logs`, and `docker inspect`.
+
+---
+
+### 8. Graph statistics
 
 ```bash
 uv run depgraph stats /path/to/repo
@@ -459,9 +500,13 @@ depgraph/
 ├── cli.py              Entry point: build / query / update / viz / stats commands
 ├── scanner.py          Walk repo, classify file types, compute sha256, record metadata
 ├── extractors/
-│   ├── __init__.py     Dispatch table by file extension
+│   ├── __init__.py     Dispatch table by language
 │   ├── python_ast.py   Python: imports, inheritance, call frequency, docstring (stdlib ast)
-│   └── js_ts.py        JS/TS: import/export/require/extends (tree-sitter; regex fallback)
+│   ├── js_ts.py        JS/TS: import/export/require/extends (tree-sitter; regex fallback)
+│   ├── go_lang.py      Go: import paths → package dirs, func/type defs
+│   ├── rust_lang.py    Rust: mod declarations + use crate:: paths, fn/struct/trait defs
+│   └── java_lang.py    Java: package-mirrored imports, class/interface/enum defs
+├── slicer.py           Query-scoped symbol slicing → inline "answer pack" (per-language)
 ├── describe.py         Heuristic one-line descriptions from docstrings and structure
 ├── weights.py          Edge weight scoring: 1–10, clamped, summed across relationship types
 ├── graph_builder.py    Cross-file import resolution → NetworkX DiGraph; sync_graph() for patches
@@ -483,14 +528,35 @@ examples/
 
 ---
 
-## Extending to New Languages
+## Language Support
 
-The extractor system is designed to be extended. To add a new language:
+depgraph is multi-language. A language is *fully supported* when all three stages work:
+its files become graph nodes, its imports build dependency edges, and query results are
+sliced to the relevant symbols inline.
 
-1. Create `depgraph/extractors/your_lang.py` implementing `extract(node) -> ExtractionResult`
-2. Register the file extensions in `depgraph/extractors/__init__.py`
+| Language | Nodes | Dependency edges | Symbol slicing |
+|----------|:-----:|:----------------:|:--------------:|
+| Python | ✅ | ✅ (stdlib `ast`) | ✅ (`ast`) |
+| JavaScript / TypeScript (+ JSX/TSX) | ✅ | ✅ (tree-sitter; regex fallback) | ✅ |
+| Go | ✅ | ✅ (import path → package dir) | ✅ |
+| Rust | ✅ | ✅ (`mod` + `use crate::`) | ✅ |
+| Java | ✅ | ✅ (package-mirrored imports) | ✅ |
+| C, C++, C#, Swift, Kotlin, Scala, PHP, Objective-C | — | — | ✅ (sliced if selected) |
 
-Everything else — graph building, retrieval, incremental sync, HTML viewer, MCP tools — works without modification.
+The slicer understands all brace-family languages, so the moment an extractor is added for
+one, slicing already works. Non-`ast` extractors are regex-based: robust for the common
+import/definition forms, and every slice carries line ranges so the agent can fall back to a
+full read if needed.
+
+### Adding a language
+
+1. Create `depgraph/extractors/your_lang.py` implementing `extract(text) -> ExtractResult`
+   (imports, `defined_symbols`, optional inheritance/usage counts).
+2. Register the extension in `scanner.py` (`CODE_EXTENSIONS`) and the dispatch in
+   `extractors/__init__.py`; add a `_resolve_<lang>` in `graph_builder.py` for edges.
+
+Everything else — retrieval, slicing, incremental sync, HTML viewer, MCP tools — works
+without modification.
 
 ---
 
@@ -500,7 +566,7 @@ Everything else — graph building, retrieval, incremental sync, HTML viewer, MC
 |---------|:--------:|---------|
 | `networkx` | Yes | Graph data structure and traversal |
 | `mcp` | For Claude Code integration | MCP stdio server |
-| `tree-sitter` + `tree-sitter-languages` | Optional | Accurate JS/TS dependency extraction |
+| `tree-sitter` + `tree-sitter-languages` | Optional | More accurate JS/TS extraction (Go/Rust/Java/Python need nothing extra) |
 | `anthropic` | Optional | LLM-generated file descriptions |
 
 Python 3.9 or later. No database, no server, no external services required for core functionality.
