@@ -30,7 +30,7 @@ Without graph:  AI searches 1,600 files → reads ~35 wrong ones → wanders for
 With graph:     AI queries the map → reads 12 targeted files → done in 11 turns
 ```
 
-> Measured on a real 1,600-file monorepo. Full results in [ab_test_summary.md](./ab_test_summary.md).
+> Measured across small, medium, and large repos. Full results in [7ab_test_summary.md](./7ab_test_summary.md).
 
 ---
 
@@ -465,31 +465,34 @@ Every `depgraph_query` call first runs the incremental sync. So when Claude edit
 
 ## Measured Results
 
-We measured real token usage and cost on a 1,600-file monorepo using `tools/ab_token_test.py` — the same task run twice: once with the graph, once without. Three representative tasks:
+We measure real token usage and cost with `tools/ab_token_test.py` — the same task run twice, once with the graph and once without — across three repos of different sizes. The latest sweep (symbol slicing active) was run on **three repos** of increasing size:
 
-| Task type | Without graph | With graph | Cost change |
-|-----------|:---:|:---:|:---:|
-| Pinpoint ("explain auth flow") | $0.60 · 8 turns | $0.73 · 9 turns | +22% |
-| Keyword-ambiguous ("API client") | $0.45 · 5 turns | $1.01 · 12 turns | +125% |
-| Cross-cutting ("trace data pipeline") | $0.90 · **20 turns** | $0.57 · **11 turns** | **−33%** |
-| **Total** | **$1.95** | **$2.31** | **+18%** |
+| Repo | Size | Without graph | With graph | Cost change |
+|------|------|:---:|:---:|:---:|
+| FitLLM | small (30 files) | $0.103 | $0.163 | **−58%** |
+| ART | medium (377 files) | $0.285 | $0.160 | **+44% cheaper** |
+| Monorepo | large (1,692 files) | $0.517 | $0.299 | **+42% cheaper** |
+
+*(Measured on Claude Haiku so the sweep is cheap and repeatable — compare percentages, not absolute dollars.)*
 
 ### What the data shows
 
-The graph is not a universal cost saver. It wins decisively when the task is genuinely cross-cutting — spanning multiple modules across the codebase — where the baseline wastes turns on exploration. It loses when the task is narrow enough that grep already nails it in one pass.
+The turning point was **symbol slicing**: the tool now inlines the relevant code (`=== CODE ===` answer pack) instead of returning bare file paths, so the AI answers without a separate Read turn per file. That single change flipped both the **medium and large repos to net-positive in the same sweep** (+44% and +42% cheaper) — previously only the large monorepo cleared break-even.
+
+The graph is still not a universal cost saver. It wins once there is real exploration to eliminate, and loses on tiny repos where grep already nails the answer in one pass.
 
 | Scenario | Does the graph help? |
 |---|:---:|
 | Large repo, complex multi-file task | **Yes** |
+| Medium repo, cross-cutting task | **Yes** |
 | Tracing flows across many modules | **Yes** |
 | Unfamiliar codebase, first orientation | **Yes** |
-| Small repo (< 100 files) | No |
+| Small repo (< ~100 files) | No |
 | Simple pinpoint bug | No |
-| Ambiguous broad query | No |
 
-The real value of the graph is not average token reduction — it is **bounding worst-case exploration**. The 20-turn wandering session becomes an 11-turn targeted session. That consistency and predictability is what the graph is actually for.
+The mechanism is **eliminating exploration turns**: on ART the graph cut a 12-turn evaluation task to 7 and an attack-tracing task to 2, answering straight from the inlined slices. The small-repo penalty (FitLLM −58%) is expected and partly a measurement outlier — on a 30-file repo there is almost nothing to explore, so any graph overhead is pure loss.
 
-> Full breakdown with per-task numbers: [ab_test_summary.md](./ab_test_summary.md)
+> Full breakdown with per-task numbers: [7ab_test_summary.md](./7ab_test_summary.md)
 
 ---
 
