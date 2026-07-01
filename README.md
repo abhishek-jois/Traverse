@@ -492,7 +492,11 @@ The graph is still not a universal cost saver. It wins once there is real explor
 
 The mechanism is **eliminating exploration turns**: on ART the graph cut a 12-turn evaluation task to 7 and an attack-tracing task to 2, answering straight from the inlined slices. The small-repo penalty (FitLLM −58%) is expected and partly a measurement outlier — on a 30-file repo there is almost nothing to explore, so any graph overhead is pure loss.
 
+<<<<<<< HEAD
 > Reproduce with `python tools/ab_token_test.py <repo> "<task>"` — it runs each task twice (with/without the graph) and diffs real token usage and cost.
+=======
+> Full breakdown with per-task numbers: [7ab_test_summary.md](./7ab_test_summary.md)
+>>>>>>> origin/main
 
 ---
 
