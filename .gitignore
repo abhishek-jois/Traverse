@@ -86,3 +86,6 @@ tools/*.json
 # ── pip internals ─────────────────────────────────────────────────────────────
 pip-wheel-metadata/
 .pip/
+
+# Draft paper (not for the repo)
+paper/
