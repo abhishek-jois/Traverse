@@ -18,6 +18,7 @@ next query sees an up-to-date graph without ever rebuilding the whole thing.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 
 import networkx as nx
@@ -122,11 +123,18 @@ def _extract_for(root: str, node, *, force: bool) -> ExtractResult:
     return res
 
 
-def _write_html(g: nx.DiGraph, root: str) -> str:
+def _write_html(g: nx.DiGraph, root: str) -> str | None:
+    """Write the interactive HTML viewer. Never fatal: a viewer failure must not
+    break a build/sync/query, so any error is swallowed after a stderr warning."""
     html_path = os.path.join(store.out_dir(root), "graph.html")
-    html_export.export_html(
-        g, html_path, title=f"Dependency Graph · {os.path.basename(root)}")
-    return html_path
+    try:
+        html_export.export_html(
+            g, html_path, title=f"Dependency Graph · {os.path.basename(root)}")
+        return html_path
+    except Exception as exc:  # viewer is a convenience artefact, not core data
+        print(f"depgraph: warning — could not write graph.html: {exc}",
+              file=sys.stderr)
+        return None
 
 
 def full_build(root: str, *, rebuild: bool = False, include_docs: bool = False,
@@ -195,6 +203,12 @@ def sync(root: str, *, include_docs: bool = False,
                 changed.add(p)
 
     if not (added or changed or deleted):
+        # Already current — but self-heal derived artefacts that may be missing
+        # (e.g. a graph built before the HTML viewer existed, or one whose
+        # graph.html was cleaned). Cheap: only writes when the file is absent.
+        if write_html and not os.path.exists(
+                os.path.join(store.out_dir(root), "graph.html")):
+            _write_html(g, root)
         return report                      # already current — fast common case
 
     # Hash newly-added files; unchanged files inherit their stored hash so the
