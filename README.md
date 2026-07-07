@@ -465,38 +465,59 @@ Every `depgraph_query` call first runs the incremental sync. So when Claude edit
 
 ## Measured Results
 
-We measure real token usage and cost with `tools/ab_token_test.py` — the same task run twice, once with the graph and once without — across three repos of different sizes. The latest sweep (symbol slicing active) was run on **three repos** of increasing size:
+We report three kinds of measurement, honestly: **systems efficiency** (deterministic, the robust win), **retrieval localization** on public SWE-bench ground truth, and an **end-to-end cost A/B**. Where a result is not statistically significant, we say so.
 
-| Repo | Size | Without graph | With graph | Cost change |
-|------|------|:---:|:---:|:---:|
-| FitLLM | small (30 files) | $0.103 | $0.163 | **−58%** |
-| ART | medium (377 files) | $0.285 | $0.160 | **+44% cheaper** |
-| Monorepo | large (1,692 files) | $0.517 | $0.299 | **+42% cheaper** |
+### 1. Systems efficiency — the robust, deterministic win
 
-*(Measured on Claude Haiku so the sweep is cheap and repeatable — compare percentages, not absolute dollars.)*
+The metadata-only index is tiny and cheap to keep current, so it can be rebuilt and queried before every task with negligible overhead.
 
-### What the data shows
+| Repo | Nodes | Cold build | Index size | vs. vector index | Confirm-current sync |
+|------|------:|-----------:|-----------:|:---:|:---:|
+| FitLLM | 30 | 0.19 s | 38 KB | **21× smaller** | 6 ms |
+| ART | 377 | 1.56 s | 436 KB | **143× smaller** | 31 ms |
+| Monorepo | 1,710 | 9.07 s | 1.6 MB | **27× smaller** | 219 ms |
 
-The turning point was **symbol slicing**: the tool now inlines the relevant code (`=== CODE ===` answer pack) instead of returning bare file paths, so the AI answers without a separate Read turn per file. That single change flipped both the **medium and large repos to net-positive in the same sweep** (+44% and +42% cheaper) — previously only the large monorepo cleared break-even.
+- **Query latency** is 6–111 ms end-to-end (rank + answer pack) — 1–2 orders of magnitude below a single model round trip, so retrieval is never the bottleneck.
+- **Incremental sync** when nothing changed is up to **41× cheaper** than a full rebuild (219 ms vs 9.07 s on the monorepo), and a one-file edit re-syncs in ~19× less time than a rebuild.
 
-The graph is still not a universal cost saver. It wins once there is real exploration to eliminate, and loses on tiny repos where grep already nails the answer in one pass.
+### 2. Retrieval localization — an orthogonal signal, best in fusion
+
+On multi-file SWE-bench instances (gold = files touched by the fix), we compare file-localization recall against real baselines on identical instances:
+
+| Retriever | R@5 | R@10 | R@20 | MRR |
+|-----------|----:|-----:|-----:|----:|
+| Aider repo-map (tree-sitter + PageRank) | 0.062 | 0.148 | 0.329 | 0.119 |
+| Dense embeddings (bge-small, file-level) | 0.237 | 0.365 | 0.478 | 0.375 |
+| Traverse (metadata only) | 0.305 | 0.425 | 0.504 | 0.403 |
+| BM25 (content) | 0.403 | **0.593** | 0.724 | **0.467** |
+| **BM25 + graph (RRF fusion)** | **0.423** | 0.567 | **0.735** | 0.462 |
+
+The honest ordering is **lexical (BM25) ≳ structural (Traverse) ≳ dense ≳ global-map (Aider)**. The metadata graph is *not* a better standalone localizer than content search — but it is an **orthogonal signal**: fusing it with BM25 wins at the tails (R@5, R@20), recovering ≥1 gold file that BM25's top-20 missed in **25% of instances**.
+
+### 3. End-to-end cost A/B — positive on average, not proven
+
+We ran a paired multi-seed A/B (5 seeds × tasks, interleaved with/without the graph, on Claude Haiku):
+
+| Repo | n pairs | Mean cost change | Wilcoxon p | Significant? |
+|------|--------:|:---:|:---:|:---:|
+| FitLLM | 10 | +18% cheaper | 0.39 | no |
+| ART | 15 | +21% cheaper | 0.86 | no |
+| Monorepo | 10 | +6% cheaper | 0.14 | no |
+
+The graph is cheaper *on the mean* everywhere, but the distribution is right-skewed and **no repo reaches statistical significance**. Earlier single-shot figures (the old "+44%/+42% cheaper" headline) were **sampling artifacts** — a single pair each — and have been retired in favour of these seeded results.
+
+### When the graph helps
 
 | Scenario | Does the graph help? |
 |---|:---:|
 | Large repo, complex multi-file task | **Yes** |
-| Medium repo, cross-cutting task | **Yes** |
 | Tracing flows across many modules | **Yes** |
 | Unfamiliar codebase, first orientation | **Yes** |
+| Augmenting content search (fusion) | **Yes** |
 | Small repo (< ~100 files) | No |
 | Simple pinpoint bug | No |
 
-The mechanism is **eliminating exploration turns**: on ART the graph cut a 12-turn evaluation task to 7 and an attack-tracing task to 2, answering straight from the inlined slices. The small-repo penalty (FitLLM −58%) is expected and partly a measurement outlier — on a 30-file repo there is almost nothing to explore, so any graph overhead is pure loss.
-
-<<<<<<< HEAD
-> Reproduce with `python tools/ab_token_test.py <repo> "<task>"` — it runs each task twice (with/without the graph) and diffs real token usage and cost.
-=======
-> Full breakdown with per-task numbers: [7ab_test_summary.md](./7ab_test_summary.md)
->>>>>>> origin/main
+> Reproduce systems + localization numbers with the scripts in the paper's `bench/` harness; reproduce the cost A/B with `python tools/ab_token_test.py <repo> "<task>"` (runs each task twice, with/without the graph, and diffs real token usage and cost).
 
 ---
 
