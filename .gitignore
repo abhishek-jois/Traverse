@@ -89,3 +89,6 @@ pip-wheel-metadata/
 
 # Draft paper (not for the repo)
 paper/
+
+# Private future-work / improvement notes (not for the repo)
+improvements.md

@@ -50,6 +50,16 @@ CODE_EXTENSIONS = {
     ".go": "go",
     ".rs": "rust",
     ".java": "java",
+    ".c": "c",
+    ".h": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cxx": "cpp",
+    ".c++": "cpp",
+    ".hpp": "cpp",
+    ".hh": "cpp",
+    ".hxx": "cpp",
+    ".h++": "cpp",
 }
 
 # Extensions we still track as nodes (so they are *visible*) but do not parse.

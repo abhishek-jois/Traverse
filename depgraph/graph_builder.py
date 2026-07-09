@@ -8,6 +8,7 @@ third-party packages are dropped — we only graph files that exist in the repo.
 
 from __future__ import annotations
 
+import posixpath
 import re as _re
 import sys
 
@@ -44,7 +45,7 @@ class _Index:
             d = n.path.rsplit("/", 1)[0] if "/" in n.path else ""
             self.dir_files.setdefault(d, []).append(n.path)
 
-            if n.language in ("java", "rust"):
+            if n.language in ("java", "rust", "c", "cpp"):
                 parts = noext.split("/")
                 for i in range(len(parts)):
                     self.path_suffix.setdefault("/".join(parts[i:]), []).append(n.path)
@@ -281,6 +282,8 @@ def _resolve(node: FileNode, imp: Import, index: _Index) -> tuple[list[str], boo
         return _resolve_rust(node, imp, index)
     if node.language == "java":
         return _resolve_java(node, imp, index)
+    if node.language in ("c", "cpp"):
+        return _resolve_c(node, imp, index)
     return _resolve_js(node, imp, index)
 
 
@@ -317,6 +320,40 @@ def _resolve_go(node: FileNode, imp: Import, index: _Index) -> tuple[list[str], 
                      if p != node.path and p.endswith(".go")]
             if files:
                 return (files[:12], i == 0)      # exact only when the full path matched
+    return [], True
+
+
+def _resolve_c(node: FileNode, imp: Import, index: _Index) -> tuple[list[str], bool]:
+    """Resolve a C/C++ ``#include "path"`` to an internal header/source file.
+
+    A quoted include names a path relative to the including file or a project
+    include root; the compiler's ``-I`` search paths are unknown to us, so we try,
+    in order: (1) relative to the including file's own directory (handling
+    ``./`` and ``../``); (2) a path-suffix match anywhere in the tree; (3) a bare
+    basename match (an INFERRED edge). Angle-bracket ``<...>`` includes are system
+    headers and never reach here (the extractor keeps only quoted includes).
+    """
+    noext = _strip_ext(imp.module).replace("\\", "/")
+
+    # 1. Relative to the including file's directory (normalises ./ and ../).
+    d = node.path.rsplit("/", 1)[0] if "/" in node.path else ""
+    rel = posixpath.normpath(f"{d}/{noext}" if d else noext)
+    hit = index.by_noext.get(rel)
+    if hit and hit != node.path:
+        return [hit], True
+
+    # 2. Path-suffix match anywhere in the tree (project include root unknown).
+    hits = index.path_suffix.get(noext.lstrip("./"))
+    if hits:
+        picked = [p for p in hits if p != node.path]
+        if picked:
+            return [picked[0]], True
+
+    # 3. Bare basename fallback -> inferred edge.
+    base = noext.rsplit("/", 1)[-1]
+    cand = [p for p in index.by_basename.get(base, []) if p != node.path]
+    if cand:
+        return [cand[0]], False
     return [], True
 
 

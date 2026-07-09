@@ -50,7 +50,7 @@ Scanner          Walks every file. Records path, type, size, hash.
     ▼
 Extractor        Per-file: extracts imports, function calls,
                  class inheritance, config references.
-                 Python (stdlib ast), JS/TS, Go, Rust, Java.
+                 Python (stdlib ast), JS/TS, Go, Rust, Java, C/C++.
     │
     ▼
 Graph Builder    Resolves cross-file relationships into a directed graph.

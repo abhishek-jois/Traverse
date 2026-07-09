@@ -60,4 +60,7 @@ def extract(node: FileNode, text: str | None = None) -> ExtractResult:
     if node.language == "java":
         from . import java_lang
         return java_lang.extract(text)
+    if node.language in ("c", "cpp"):
+        from . import c_cpp
+        return c_cpp.extract(text)
     return ExtractResult()
