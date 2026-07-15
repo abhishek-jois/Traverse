@@ -172,12 +172,34 @@ def depgraph_query(query: str, path: str = ".",
 
     # Header: paths + 5-word hint. The response re-processes every turn as
     # cache-read, so keep it tight; the code below carries the actual content.
-    lines = [f"Files for: {query!r}  ({len(result.selected)} found)"]
-    for s in result.selected:
-        abs_path = os.path.join(root, s.path)
-        hint = " ".join(s.description.split()[:5]).rstrip(".,;:")
-        lines.append(f"{abs_path}  # {hint}")
-    lines.append(f"Read these files. (~{result.selected_tokens:,} tok of {result.total_tokens:,})")
+    # The header is a MAP, not a read-list: the query-relevant code is inlined in
+    # the CODE section below, so a capable agent should answer from the slices and
+    # open a full file only when a slice is missing or truncated. Telling the agent
+    # to "read these files" made stronger models open every file on top of the
+    # slices, doubling turns for no gain (measured on Sonnet); we frame it as
+    # trust-the-pack instead.
+    # DEPGRAPH_LEGACY_HEADER=1 restores the pre-fix wording verbatim. It exists so the
+    # A/B study can extend its *pre-fix* arms with the exact instruction they were
+    # collected under; without it the two halves of the comparison would differ. Not
+    # used in normal operation.
+    if os.environ.get("DEPGRAPH_LEGACY_HEADER") == "1":
+        lines = [f"Files for: {query!r}  ({len(result.selected)} found)"]
+        for s in result.selected:
+            abs_path = os.path.join(root, s.path)
+            hint = " ".join(s.description.split()[:5]).rstrip(".,;:")
+            lines.append(f"{abs_path}  # {hint}")
+        lines.append(f"Read these files. (~{result.selected_tokens:,} tok of "
+                     f"{result.total_tokens:,})")
+    else:
+        lines = [f"Relevant files for: {query!r}  ({len(result.selected)} found) — "
+                 f"query-relevant code is inlined below."]
+        for s in result.selected:
+            abs_path = os.path.join(root, s.path)
+            hint = " ".join(s.description.split()[:5]).rstrip(".,;:")
+            lines.append(f"{abs_path}  # {hint}")
+        lines.append(f"(~{result.selected_tokens:,} of {result.total_tokens:,} repo tok.) "
+                     f"Answer from the inlined slices below; open a file in full only if "
+                     f"it has no slice or its slice is marked truncated.")
 
     # Inline query-scoped code slices (not whole files). Slices are small enough
     # to stay cheap at any repo size, and they remove the per-file Read turns that
